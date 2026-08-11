@@ -7,6 +7,7 @@
 #include <libopenmpt/libopenmpt.h>
 
 #define LOG_TAG "fluttermodp/openmpt"
+#define CHANNEL_COUNT 2
 
 static openmpt_module *g_module = NULL;
 static char g_last_message[1024] = "libopenmpt has not been initialized.";
@@ -128,3 +129,47 @@ Java_net_klovnin_fluttermodp_MainActivity_nativeGetLastMessage(
     return (*env)->NewStringUTF(env, g_last_message);
 }
 
+JNIEXPORT jbyteArray JNICALL
+Java_net_klovnin_fluttermodp_MainActivity_nativeRenderPcm(
+        JNIEnv *env,
+        jobject activity,
+        jint frame_count,
+        jint sample_rate) {
+    (void)activity;
+
+    if (g_module == NULL || frame_count <= 0 || sample_rate <= 0) {
+        return (*env)->NewByteArray(env, 0);
+    }
+
+    const size_t sample_capacity = (size_t)frame_count * CHANNEL_COUNT;
+    int16_t *samples = malloc(sample_capacity * sizeof(int16_t));
+    if (samples == NULL) {
+        __android_log_print(ANDROID_LOG_ERROR, LOG_TAG,
+                            "PCM allocation failed for %d frames.", frame_count);
+        return (*env)->NewByteArray(env, 0);
+    }
+
+    const size_t rendered_frames = openmpt_module_read_interleaved_stereo(
+            g_module,
+            sample_rate,
+            (size_t)frame_count,
+            samples);
+    const size_t rendered_bytes =
+            rendered_frames * CHANNEL_COUNT * sizeof(int16_t);
+
+    jbyteArray result = (*env)->NewByteArray(env, (jsize)rendered_bytes);
+    if (result != NULL && rendered_bytes > 0) {
+        (*env)->SetByteArrayRegion(
+                env,
+                result,
+                0,
+                (jsize)rendered_bytes,
+                (const jbyte *)samples);
+    }
+    free(samples);
+
+    if (rendered_frames == 0) {
+        __android_log_print(ANDROID_LOG_INFO, LOG_TAG, "Playback reached the end.");
+    }
+    return result;
+}

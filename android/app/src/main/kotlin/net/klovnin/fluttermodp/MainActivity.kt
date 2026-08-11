@@ -20,17 +20,13 @@ class MainActivity : FlutterActivity() {
 
     private external fun nativeInitializeModule(moduleData: ByteArray): Boolean
     private external fun nativeGetLastMessage(): String
+    private external fun nativeRenderPcm(frameCount: Int, sampleRate: Int): ByteArray
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
 
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
             .setMethodCallHandler { call, result ->
-                if (call.method != "initialize") {
-                    result.notImplemented()
-                    return@setMethodCallHandler
-                }
-
                 nativeLibraryError?.let { error ->
                     result.success(
                         mapOf(
@@ -41,25 +37,43 @@ class MainActivity : FlutterActivity() {
                     return@setMethodCallHandler
                 }
 
-                try {
-                    val assetKey = FlutterInjector.instance()
-                        .flutterLoader()
-                        .getLookupKeyForAsset(MODULE_ASSET)
-                    val moduleData = assets.open(assetKey).use { it.readBytes() }
-                    val success = nativeInitializeModule(moduleData)
-                    result.success(
-                        mapOf(
-                            "success" to success,
-                            "message" to nativeGetLastMessage(),
-                        ),
-                    )
-                } catch (error: Exception) {
-                    result.success(
-                        mapOf(
-                            "success" to false,
-                            "message" to "Could not read $MODULE_ASSET: ${error.message}",
-                        ),
-                    )
+                when (call.method) {
+                    "initialize" -> {
+                        try {
+                            val assetKey = FlutterInjector.instance()
+                                .flutterLoader()
+                                .getLookupKeyForAsset(MODULE_ASSET)
+                            val moduleData = assets.open(assetKey).use { it.readBytes() }
+                            val success = nativeInitializeModule(moduleData)
+                            result.success(
+                                mapOf(
+                                    "success" to success,
+                                    "message" to nativeGetLastMessage(),
+                                ),
+                            )
+                        } catch (error: Exception) {
+                            result.success(
+                                mapOf(
+                                    "success" to false,
+                                    "message" to "Could not read $MODULE_ASSET: ${error.message}",
+                                ),
+                            )
+                        }
+                    }
+                    "render" -> {
+                        val frameCount = call.argument<Int>("frameCount") ?: 0
+                        val sampleRate = call.argument<Int>("sampleRate") ?: 0
+                        if (frameCount !in 1..32768 || sampleRate !in 8000..192000) {
+                            result.error(
+                                "invalid_arguments",
+                                "Invalid PCM request: $frameCount frames at $sampleRate Hz",
+                                null,
+                            )
+                        } else {
+                            result.success(nativeRenderPcm(frameCount, sampleRate))
+                        }
+                    }
+                    else -> result.notImplemented()
                 }
             }
     }
