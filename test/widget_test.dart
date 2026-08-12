@@ -11,11 +11,12 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:fluttermodp/main.dart';
 
 void main() {
-  testWidgets('shows the module file picker', (WidgetTester tester) async {
-    // Build our app and trigger a frame.
+  testWidgets('shows empty playlist controls', (WidgetTester tester) async {
     await tester.pumpWidget(const FlutterModp());
 
-    expect(find.text('モジュールファイルを選択'), findsOneWidget);
-    expect(find.byIcon(Icons.audio_file), findsOneWidget);
+    expect(find.text('曲を追加'), findsOneWidget);
+    expect(find.text('m3u読込'), findsOneWidget);
+    expect(find.textContaining('プレイリストは空です'), findsOneWidget);
+    expect(find.byIcon(Icons.play_arrow), findsOneWidget);
   });
 }

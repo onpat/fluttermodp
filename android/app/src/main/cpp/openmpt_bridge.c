@@ -142,6 +142,21 @@ Java_net_klovnin_fluttermodp_NativeOpenMpt_nativeGetLastMessage(
     return result;
 }
 
+JNIEXPORT void JNICALL
+Java_net_klovnin_fluttermodp_NativeOpenMpt_nativeSetRepeatCount(
+        JNIEnv *env,
+        jobject object,
+        jint repeat_count) {
+    (void)env;
+    (void)object;
+
+    pthread_mutex_lock(&g_module_mutex);
+    if (g_module != NULL) {
+        openmpt_module_set_repeat_count(g_module, repeat_count);
+    }
+    pthread_mutex_unlock(&g_module_mutex);
+}
+
 JNIEXPORT jbyteArray JNICALL
 Java_net_klovnin_fluttermodp_NativeOpenMpt_nativeRenderPcm(
         JNIEnv *env,

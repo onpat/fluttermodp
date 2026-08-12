@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -8,6 +10,54 @@ class _InitializationResult {
 
   final bool success;
   final String message;
+}
+
+class PlaylistEntry {
+  const PlaylistEntry({required this.uri, required this.name});
+
+  final String uri;
+  final String name;
+
+  factory PlaylistEntry.fromMap(Map<Object?, Object?> map) => PlaylistEntry(
+    uri: map['uri'] as String? ?? '',
+    name: map['name'] as String? ?? '名称不明',
+  );
+}
+
+class PlaylistState {
+  const PlaylistState({
+    this.entries = const [],
+    this.currentIndex = -1,
+    this.repeatOne = false,
+    this.repeatPlaylist = false,
+    this.isPlaying = false,
+    this.isPaused = false,
+    this.status = 'プレイリストを読み込んでいます…',
+  });
+
+  final List<PlaylistEntry> entries;
+  final int currentIndex;
+  final bool repeatOne;
+  final bool repeatPlaylist;
+  final bool isPlaying;
+  final bool isPaused;
+  final String status;
+
+  factory PlaylistState.fromMap(Map<Object?, Object?> map) {
+    final rawEntries = map['entries'] as List<Object?>? ?? const [];
+    return PlaylistState(
+      entries: rawEntries
+          .whereType<Map<Object?, Object?>>()
+          .map(PlaylistEntry.fromMap)
+          .toList(growable: false),
+      currentIndex: (map['currentIndex'] as num?)?.toInt() ?? -1,
+      repeatOne: map['repeatOne'] == true,
+      repeatPlaylist: map['repeatPlaylist'] == true,
+      isPlaying: map['isPlaying'] == true,
+      isPaused: map['isPaused'] == true,
+      status: map['status'] as String? ?? '状態を取得できません。',
+    );
+  }
 }
 
 Future<_InitializationResult> _initializeOpenMpt() async {
@@ -21,14 +71,16 @@ Future<_InitializationResult> _initializeOpenMpt() async {
     debugPrint('[libopenmpt] ${success ? 'SUCCESS' : 'ERROR'}: $message');
     return _InitializationResult(success: success, message: message);
   } on PlatformException catch (error) {
-    final message = 'Platform initialization failed: ${error.message}';
-    debugPrint('[libopenmpt] ERROR: $message');
-    return _InitializationResult(success: false, message: message);
+    return _InitializationResult(
+      success: false,
+      message: 'Platform initialization failed: ${error.message}',
+    );
   } catch (error, stackTrace) {
-    final message = 'Unexpected initialization failure: $error';
-    debugPrint('[libopenmpt] ERROR: $message');
     debugPrintStack(stackTrace: stackTrace);
-    return _InitializationResult(success: false, message: message);
+    return _InitializationResult(
+      success: false,
+      message: 'Unexpected initialization failure: $error',
+    );
   }
 }
 
@@ -50,7 +102,9 @@ class FlutterModp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'Flutter MOD Player',
-      theme: ThemeData(colorScheme: .fromSeed(seedColor: Colors.deepPurple)),
+      theme: ThemeData(
+        colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple),
+      ),
       home: MyHomePage(
         title: 'Flutter MOD Player',
         initializationMessage: initializationMessage,
@@ -74,93 +128,294 @@ class MyHomePage extends StatefulWidget {
 }
 
 class _MyHomePageState extends State<MyHomePage> {
-  bool _isPicking = false;
-  String? _selectedFileName;
-  String _status = '再生するモジュールファイルを選択してください。';
+  PlaylistState _playlist = const PlaylistState();
+  Timer? _stateTimer;
+  bool _busy = false;
+  bool _refreshing = false;
+  String? _operationMessage;
 
-  Future<void> _pickAndPlay() async {
-    if (_isPicking) return;
-    setState(() {
-      _isPicking = true;
-      _status = 'ファイル選択画面を開いています…';
-    });
+  @override
+  void initState() {
+    super.initState();
+    _refreshState();
+    _stateTimer = Timer.periodic(
+      const Duration(milliseconds: 750),
+      (_) => _refreshState(quiet: true),
+    );
+  }
 
+  @override
+  void dispose() {
+    _stateTimer?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _refreshState({bool quiet = false}) async {
+    if (_refreshing) return;
+    _refreshing = true;
     try {
-      final selected = await _openMptChannel.invokeMapMethod<String, Object?>(
-        'pickFile',
+      final result = await _openMptChannel.invokeMapMethod<Object?, Object?>(
+        'getPlaylist',
       );
-      if (!mounted) return;
-      if (selected == null) {
-        setState(() => _status = 'ファイル選択をキャンセルしました。');
-        return;
+      if (mounted && result != null) {
+        setState(() => _playlist = PlaylistState.fromMap(result));
       }
-
-      final uri = selected['uri'] as String?;
-      final name = selected['name'] as String? ?? 'selected module';
-      if (uri == null || uri.isEmpty) {
-        throw PlatformException(
-          code: 'invalid_file',
-          message: '選択されたファイルの URI を取得できませんでした。',
-        );
+    } on MissingPluginException {
+      if (mounted && !quiet) {
+        setState(() => _operationMessage = 'Android端末で実行してください。');
       }
-
-      setState(() {
-        _selectedFileName = name;
-        _status = '$name を読み込んでいます…';
-      });
-      final result = await _openMptChannel.invokeMapMethod<String, Object?>(
-        'playFile',
-        {'uri': uri, 'name': name},
-      );
-      if (!mounted) return;
-      final success = result?['success'] == true;
-      setState(() {
-        _status =
-            result?['message'] as String? ??
-            (success ? '再生を開始しました。' : '再生を開始できませんでした。');
-      });
     } on PlatformException catch (error) {
-      if (mounted) setState(() => _status = error.message ?? error.code);
-    } catch (error) {
-      if (mounted) setState(() => _status = 'ファイルの再生に失敗しました: $error');
+      if (mounted && !quiet) {
+        setState(() => _operationMessage = error.message ?? error.code);
+      }
     } finally {
-      if (mounted) setState(() => _isPicking = false);
+      _refreshing = false;
     }
+  }
+
+  Future<void> _invoke(
+    String method, {
+    Map<String, Object?>? arguments,
+    bool showBusy = false,
+  }) async {
+    if (_busy) return;
+    setState(() {
+      if (showBusy) _busy = true;
+      _operationMessage = null;
+    });
+    try {
+      final result = await _openMptChannel.invokeMethod<Object?>(
+        method,
+        arguments,
+      );
+      if (!mounted) return;
+      if (result is Map && result['message'] is String) {
+        setState(() => _operationMessage = result['message'] as String);
+      }
+      await _refreshState();
+    } on PlatformException catch (error) {
+      if (mounted) {
+        setState(() => _operationMessage = error.message ?? error.code);
+      }
+    } finally {
+      if (mounted && showBusy) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _confirmClear() async {
+    if (_playlist.entries.isEmpty) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('プレイリストを空にしますか？'),
+        content: const Text('再生中の場合は停止します。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('キャンセル'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('空にする'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true) await _invoke('clearPlaylist');
   }
 
   @override
   Widget build(BuildContext context) {
+    final hasTracks = _playlist.entries.isNotEmpty;
+    final currentIsActive = _playlist.isPlaying || _playlist.isPaused;
+
     return Scaffold(
       appBar: AppBar(
         backgroundColor: Theme.of(context).colorScheme.inversePrimary,
         title: Text(widget.title),
       ),
-      body: Center(
-        child: Padding(
-          padding: const EdgeInsets.all(24),
-          child: Column(
-            mainAxisAlignment: .center,
-            children: [
-              const Text('libopenmpt initialization result:'),
-              const SizedBox(height: 8),
-              Text(widget.initializationMessage, textAlign: TextAlign.center),
-              const SizedBox(height: 32),
-              FilledButton.icon(
-                onPressed: _isPicking ? null : _pickAndPlay,
-                icon: const Icon(Icons.audio_file),
-                label: Text(_isPicking ? '処理中…' : 'モジュールファイルを選択'),
+      body: SafeArea(
+        child: Column(
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+              child: Column(
+                children: [
+                  Text(
+                    _playlist.status,
+                    key: const ValueKey('playbackStatus'),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    textAlign: TextAlign.center,
+                    style: Theme.of(context).textTheme.titleSmall,
+                  ),
+                  if (_operationMessage != null) ...[
+                    const SizedBox(height: 4),
+                    Text(
+                      _operationMessage!,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      textAlign: TextAlign.center,
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ],
+                ],
               ),
-              const SizedBox(height: 16),
-              if (_selectedFileName != null)
-                Text(
-                  '選択中: $_selectedFileName',
-                  textAlign: TextAlign.center,
-                  style: Theme.of(context).textTheme.titleMedium,
+            ),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                IconButton(
+                  tooltip: '前の曲',
+                  onPressed: hasTracks ? () => _invoke('previous') : null,
+                  icon: const Icon(Icons.skip_previous),
                 ),
-              const SizedBox(height: 8),
-              Text(_status, textAlign: TextAlign.center),
-            ],
-          ),
+                IconButton.filled(
+                  tooltip: _playlist.isPlaying ? '一時停止' : '再生',
+                  onPressed: hasTracks
+                      ? () => _invoke(_playlist.isPlaying ? 'pause' : 'play')
+                      : null,
+                  icon: Icon(
+                    _playlist.isPlaying ? Icons.pause : Icons.play_arrow,
+                  ),
+                ),
+                IconButton(
+                  tooltip: '停止',
+                  onPressed: currentIsActive ? () => _invoke('stop') : null,
+                  icon: const Icon(Icons.stop),
+                ),
+                IconButton(
+                  tooltip: '次の曲',
+                  onPressed: hasTracks ? () => _invoke('next') : null,
+                  icon: const Icon(Icons.skip_next),
+                ),
+              ],
+            ),
+            Row(
+              children: [
+                Expanded(
+                  child: SwitchListTile(
+                    dense: true,
+                    title: const Text('1曲リピート'),
+                    value: _playlist.repeatOne,
+                    onChanged: (enabled) => _invoke(
+                      'setRepeatOne',
+                      arguments: {'enabled': enabled},
+                    ),
+                  ),
+                ),
+                Expanded(
+                  child: SwitchListTile(
+                    dense: true,
+                    title: const Text('全曲リピート'),
+                    value: _playlist.repeatPlaylist,
+                    onChanged: (enabled) => _invoke(
+                      'setRepeatPlaylist',
+                      arguments: {'enabled': enabled},
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              child: Wrap(
+                alignment: WrapAlignment.center,
+                spacing: 8,
+                children: [
+                  TextButton.icon(
+                    onPressed: _busy
+                        ? null
+                        : () => _invoke('pickFiles', showBusy: true),
+                    icon: const Icon(Icons.playlist_add),
+                    label: const Text('曲を追加'),
+                  ),
+                  TextButton.icon(
+                    onPressed: _busy
+                        ? null
+                        : () => _invoke('loadPlaylist', showBusy: true),
+                    icon: const Icon(Icons.folder_open),
+                    label: const Text('m3u読込'),
+                  ),
+                  TextButton.icon(
+                    onPressed: _busy
+                        ? null
+                        : () => _invoke('savePlaylist', showBusy: true),
+                    icon: const Icon(Icons.save_alt),
+                    label: const Text('m3u保存'),
+                  ),
+                  TextButton.icon(
+                    onPressed: hasTracks && !_busy ? _confirmClear : null,
+                    icon: const Icon(Icons.clear_all),
+                    label: const Text('クリア'),
+                  ),
+                ],
+              ),
+            ),
+            const Divider(height: 1),
+            Expanded(
+              child: hasTracks
+                  ? ListView.builder(
+                      itemCount: _playlist.entries.length,
+                      itemBuilder: (context, index) {
+                        final entry = _playlist.entries[index];
+                        final isCurrent = index == _playlist.currentIndex;
+                        return ListTile(
+                          selected: isCurrent,
+                          leading: SizedBox(
+                            width: 32,
+                            child: isCurrent && currentIsActive
+                                ? Icon(
+                                    _playlist.isPlaying
+                                        ? Icons.graphic_eq
+                                        : Icons.pause,
+                                  )
+                                : Text('${index + 1}'),
+                          ),
+                          title: Text(
+                            entry.name,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          subtitle: Text(
+                            entry.uri,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          trailing: IconButton(
+                            tooltip: '削除',
+                            onPressed: () => _invoke(
+                              'removeTrack',
+                              arguments: {'index': index},
+                            ),
+                            icon: const Icon(Icons.remove_circle_outline),
+                          ),
+                          onTap: () =>
+                              _invoke('playIndex', arguments: {'index': index}),
+                        );
+                      },
+                    )
+                  : Center(
+                      child: Padding(
+                        padding: const EdgeInsets.all(24),
+                        child: Text(
+                          'プレイリストは空です。\n「曲を追加」または「m3u読込」から追加してください。',
+                          textAlign: TextAlign.center,
+                          style: Theme.of(context).textTheme.bodyLarge,
+                        ),
+                      ),
+                    ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
+              child: Text(
+                widget.initializationMessage,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: Theme.of(context).textTheme.labelSmall,
+              ),
+            ),
+          ],
         ),
       ),
     );

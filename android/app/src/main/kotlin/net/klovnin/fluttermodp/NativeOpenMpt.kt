@@ -9,6 +9,7 @@ object NativeOpenMpt {
     }
 
     external fun nativeInitializeModule(moduleData: ByteArray): Boolean
+    external fun nativeSetRepeatCount(repeatCount: Int)
     external fun nativeGetLastMessage(): String
     external fun nativeRenderPcm(frameCount: Int, sampleRate: Int): ByteArray
     external fun nativeSeekToSeconds(seconds: Double): Double
