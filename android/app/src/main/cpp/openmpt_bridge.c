@@ -1,5 +1,6 @@
 #include <jni.h>
 #include <android/log.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -11,6 +12,7 @@
 
 static openmpt_module *g_module = NULL;
 static char g_last_message[1024] = "libopenmpt has not been initialized.";
+static pthread_mutex_t g_module_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static void openmpt_log_callback(const char *message, void *user) {
     (void)user;
@@ -26,15 +28,18 @@ static int openmpt_error_callback(int error, void *user) {
 }
 
 JNIEXPORT jboolean JNICALL
-Java_net_klovnin_fluttermodp_MainActivity_nativeInitializeModule(
+Java_net_klovnin_fluttermodp_NativeOpenMpt_nativeInitializeModule(
         JNIEnv *env,
         jobject activity,
         jbyteArray module_data) {
     (void)activity;
 
+    pthread_mutex_lock(&g_module_mutex);
+
     if (module_data == NULL) {
         snprintf(g_last_message, sizeof(g_last_message),
                  "Initialization failed: the module asset was null.");
+        pthread_mutex_unlock(&g_module_mutex);
         return JNI_FALSE;
     }
 
@@ -42,6 +47,7 @@ Java_net_klovnin_fluttermodp_MainActivity_nativeInitializeModule(
     if (module_size <= 0) {
         snprintf(g_last_message, sizeof(g_last_message),
                  "Initialization failed: the module asset was empty.");
+        pthread_mutex_unlock(&g_module_mutex);
         return JNI_FALSE;
     }
 
@@ -49,6 +55,7 @@ Java_net_klovnin_fluttermodp_MainActivity_nativeInitializeModule(
     if (bytes == NULL) {
         snprintf(g_last_message, sizeof(g_last_message),
                  "Initialization failed: could not allocate %d bytes.", module_size);
+        pthread_mutex_unlock(&g_module_mutex);
         return JNI_FALSE;
     }
     (*env)->GetByteArrayRegion(env, module_data, 0, module_size, (jbyte *)bytes);
@@ -56,6 +63,7 @@ Java_net_klovnin_fluttermodp_MainActivity_nativeInitializeModule(
         free(bytes);
         snprintf(g_last_message, sizeof(g_last_message),
                  "Initialization failed: could not copy the module asset.");
+        pthread_mutex_unlock(&g_module_mutex);
         return JNI_FALSE;
     }
 
@@ -87,6 +95,7 @@ Java_net_klovnin_fluttermodp_MainActivity_nativeInitializeModule(
             openmpt_free_string(error_message);
         }
         __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, "%s", g_last_message);
+        pthread_mutex_unlock(&g_module_mutex);
         return JNI_FALSE;
     }
     if (error_message != NULL) {
@@ -118,26 +127,33 @@ Java_net_klovnin_fluttermodp_MainActivity_nativeInitializeModule(
     }
 
     __android_log_print(ANDROID_LOG_INFO, LOG_TAG, "%s", g_last_message);
+    pthread_mutex_unlock(&g_module_mutex);
     return JNI_TRUE;
 }
 
 JNIEXPORT jstring JNICALL
-Java_net_klovnin_fluttermodp_MainActivity_nativeGetLastMessage(
+Java_net_klovnin_fluttermodp_NativeOpenMpt_nativeGetLastMessage(
         JNIEnv *env,
         jobject activity) {
     (void)activity;
-    return (*env)->NewStringUTF(env, g_last_message);
+    pthread_mutex_lock(&g_module_mutex);
+    jstring result = (*env)->NewStringUTF(env, g_last_message);
+    pthread_mutex_unlock(&g_module_mutex);
+    return result;
 }
 
 JNIEXPORT jbyteArray JNICALL
-Java_net_klovnin_fluttermodp_MainActivity_nativeRenderPcm(
+Java_net_klovnin_fluttermodp_NativeOpenMpt_nativeRenderPcm(
         JNIEnv *env,
         jobject activity,
         jint frame_count,
         jint sample_rate) {
     (void)activity;
 
+    pthread_mutex_lock(&g_module_mutex);
+
     if (g_module == NULL || frame_count <= 0 || sample_rate <= 0) {
+        pthread_mutex_unlock(&g_module_mutex);
         return (*env)->NewByteArray(env, 0);
     }
 
@@ -146,6 +162,7 @@ Java_net_klovnin_fluttermodp_MainActivity_nativeRenderPcm(
     if (samples == NULL) {
         __android_log_print(ANDROID_LOG_ERROR, LOG_TAG,
                             "PCM allocation failed for %d frames.", frame_count);
+        pthread_mutex_unlock(&g_module_mutex);
         return (*env)->NewByteArray(env, 0);
     }
 
@@ -171,5 +188,70 @@ Java_net_klovnin_fluttermodp_MainActivity_nativeRenderPcm(
     if (rendered_frames == 0) {
         __android_log_print(ANDROID_LOG_INFO, LOG_TAG, "Playback reached the end.");
     }
+    pthread_mutex_unlock(&g_module_mutex);
     return result;
+}
+
+JNIEXPORT jdouble JNICALL
+Java_net_klovnin_fluttermodp_NativeOpenMpt_nativeSeekToSeconds(
+        JNIEnv *env,
+        jobject object,
+        jdouble seconds) {
+    (void)env;
+    (void)object;
+
+    pthread_mutex_lock(&g_module_mutex);
+    double result = 0.0;
+    if (g_module != NULL) {
+        result = openmpt_module_set_position_seconds(
+                g_module,
+                seconds < 0.0 ? 0.0 : seconds);
+    }
+    pthread_mutex_unlock(&g_module_mutex);
+    return result;
+}
+
+JNIEXPORT jdouble JNICALL
+Java_net_klovnin_fluttermodp_NativeOpenMpt_nativeGetPositionSeconds(
+        JNIEnv *env,
+        jobject object) {
+    (void)env;
+    (void)object;
+
+    pthread_mutex_lock(&g_module_mutex);
+    const double result = g_module != NULL
+            ? openmpt_module_get_position_seconds(g_module)
+            : 0.0;
+    pthread_mutex_unlock(&g_module_mutex);
+    return result;
+}
+
+JNIEXPORT jdouble JNICALL
+Java_net_klovnin_fluttermodp_NativeOpenMpt_nativeGetDurationSeconds(
+        JNIEnv *env,
+        jobject object) {
+    (void)env;
+    (void)object;
+
+    pthread_mutex_lock(&g_module_mutex);
+    const double result = g_module != NULL
+            ? openmpt_module_get_duration_seconds(g_module)
+            : 0.0;
+    pthread_mutex_unlock(&g_module_mutex);
+    return result;
+}
+
+JNIEXPORT void JNICALL
+Java_net_klovnin_fluttermodp_NativeOpenMpt_nativeDestroyModule(
+        JNIEnv *env,
+        jobject object) {
+    (void)env;
+    (void)object;
+
+    pthread_mutex_lock(&g_module_mutex);
+    if (g_module != NULL) {
+        openmpt_module_destroy(g_module);
+        g_module = NULL;
+    }
+    pthread_mutex_unlock(&g_module_mutex);
 }

@@ -1,80 +1,87 @@
 package net.klovnin.fluttermodp
 
+import android.Manifest
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
+import android.os.Bundle
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
-import io.flutter.FlutterInjector
 import io.flutter.plugin.common.MethodChannel
 
 class MainActivity : FlutterActivity() {
     companion object {
         private const val CHANNEL = "net.klovnin.fluttermodp/libopenmpt"
-        private const val MODULE_ASSET = "assets/cavern.mod"
-
-        private val nativeLibraryError: String? = try {
-            System.loadLibrary("openmpt_bridge")
-            null
-        } catch (error: UnsatisfiedLinkError) {
-            error.message ?: "Unknown native library loading error"
-        }
     }
 
-    private external fun nativeInitializeModule(moduleData: ByteArray): Boolean
-    private external fun nativeGetLastMessage(): String
-    private external fun nativeRenderPcm(frameCount: Int, sampleRate: Int): ByteArray
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        if (
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1001)
+        }
+    }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
 
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
             .setMethodCallHandler { call, result ->
-                nativeLibraryError?.let { error ->
+                val loadError = NativeOpenMpt.loadError
+                if (loadError != null) {
                     result.success(
                         mapOf(
                             "success" to false,
-                            "message" to "Could not load the native libraries: $error",
+                            "message" to "Could not load native libraries: $loadError",
                         ),
                     )
                     return@setMethodCallHandler
                 }
 
                 when (call.method) {
-                    "initialize" -> {
-                        try {
-                            val assetKey = FlutterInjector.instance()
-                                .flutterLoader()
-                                .getLookupKeyForAsset(MODULE_ASSET)
-                            val moduleData = assets.open(assetKey).use { it.readBytes() }
-                            val success = nativeInitializeModule(moduleData)
-                            result.success(
-                                mapOf(
-                                    "success" to success,
-                                    "message" to nativeGetLastMessage(),
-                                ),
-                            )
-                        } catch (error: Exception) {
-                            result.success(
-                                mapOf(
-                                    "success" to false,
-                                    "message" to "Could not read $MODULE_ASSET: ${error.message}",
-                                ),
-                            )
-                        }
+                    "initialize", "play" -> {
+                        startPlaybackService(PlaybackService.ACTION_START)
+                        result.success(
+                            mapOf(
+                                "success" to true,
+                                "message" to "Background playback service started.",
+                            ),
+                        )
                     }
-                    "render" -> {
-                        val frameCount = call.argument<Int>("frameCount") ?: 0
-                        val sampleRate = call.argument<Int>("sampleRate") ?: 0
-                        if (frameCount !in 1..32768 || sampleRate !in 8000..192000) {
-                            result.error(
-                                "invalid_arguments",
-                                "Invalid PCM request: $frameCount frames at $sampleRate Hz",
-                                null,
-                            )
+                    "pause" -> {
+                        startService(PlaybackService.intent(this, PlaybackService.ACTION_PAUSE))
+                        result.success(true)
+                    }
+                    "stop" -> {
+                        startService(PlaybackService.intent(this, PlaybackService.ACTION_STOP))
+                        result.success(true)
+                    }
+                    "seek" -> {
+                        val positionMs = call.argument<Number>("positionMs")?.toLong()
+                        if (positionMs == null || positionMs < 0L) {
+                            result.error("invalid_arguments", "positionMs must be non-negative", null)
                         } else {
-                            result.success(nativeRenderPcm(frameCount, sampleRate))
+                            val intent = PlaybackService.intent(this, PlaybackService.ACTION_SEEK)
+                                .putExtra(PlaybackService.EXTRA_POSITION_MS, positionMs)
+                            startService(intent)
+                            result.success(true)
                         }
                     }
+                    "status" -> result.success(PlaybackService.statusMessage)
                     else -> result.notImplemented()
                 }
             }
+    }
+
+    private fun startPlaybackService(action: String) {
+        val intent = PlaybackService.intent(this, action)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(intent)
+        } else {
+            startService(intent)
+        }
     }
 }
