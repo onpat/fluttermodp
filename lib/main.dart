@@ -1,5 +1,3 @@
-import 'dart:io';
-
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -13,13 +11,6 @@ class _InitializationResult {
 }
 
 Future<_InitializationResult> _initializeOpenMpt() async {
-  if (!Platform.isAndroid) {
-    return const _InitializationResult(
-      success: false,
-      message: 'libopenmpt initialization is skipped outside Android.',
-    );
-  }
-
   try {
     final result = await _openMptChannel.invokeMapMethod<String, Object?>(
       'initialize',
@@ -83,10 +74,58 @@ class MyHomePage extends StatefulWidget {
 }
 
 class _MyHomePageState extends State<MyHomePage> {
-  int _counter = 0;
+  bool _isPicking = false;
+  String? _selectedFileName;
+  String _status = '再生するモジュールファイルを選択してください。';
 
-  void _incrementCounter() {
-    setState(() => _counter++);
+  Future<void> _pickAndPlay() async {
+    if (_isPicking) return;
+    setState(() {
+      _isPicking = true;
+      _status = 'ファイル選択画面を開いています…';
+    });
+
+    try {
+      final selected = await _openMptChannel.invokeMapMethod<String, Object?>(
+        'pickFile',
+      );
+      if (!mounted) return;
+      if (selected == null) {
+        setState(() => _status = 'ファイル選択をキャンセルしました。');
+        return;
+      }
+
+      final uri = selected['uri'] as String?;
+      final name = selected['name'] as String? ?? 'selected module';
+      if (uri == null || uri.isEmpty) {
+        throw PlatformException(
+          code: 'invalid_file',
+          message: '選択されたファイルの URI を取得できませんでした。',
+        );
+      }
+
+      setState(() {
+        _selectedFileName = name;
+        _status = '$name を読み込んでいます…';
+      });
+      final result = await _openMptChannel.invokeMapMethod<String, Object?>(
+        'playFile',
+        {'uri': uri, 'name': name},
+      );
+      if (!mounted) return;
+      final success = result?['success'] == true;
+      setState(() {
+        _status =
+            result?['message'] as String? ??
+            (success ? '再生を開始しました。' : '再生を開始できませんでした。');
+      });
+    } on PlatformException catch (error) {
+      if (mounted) setState(() => _status = error.message ?? error.code);
+    } catch (error) {
+      if (mounted) setState(() => _status = 'ファイルの再生に失敗しました: $error');
+    } finally {
+      if (mounted) setState(() => _isPicking = false);
+    }
   }
 
   @override
@@ -106,19 +145,23 @@ class _MyHomePageState extends State<MyHomePage> {
               const SizedBox(height: 8),
               Text(widget.initializationMessage, textAlign: TextAlign.center),
               const SizedBox(height: 32),
-              const Text('You have pushed the button this many times:'),
-              Text(
-                '$_counter',
-                style: Theme.of(context).textTheme.headlineMedium,
+              FilledButton.icon(
+                onPressed: _isPicking ? null : _pickAndPlay,
+                icon: const Icon(Icons.audio_file),
+                label: Text(_isPicking ? '処理中…' : 'モジュールファイルを選択'),
               ),
+              const SizedBox(height: 16),
+              if (_selectedFileName != null)
+                Text(
+                  '選択中: $_selectedFileName',
+                  textAlign: TextAlign.center,
+                  style: Theme.of(context).textTheme.titleMedium,
+                ),
+              const SizedBox(height: 8),
+              Text(_status, textAlign: TextAlign.center),
             ],
           ),
         ),
-      ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: _incrementCounter,
-        tooltip: 'Increment',
-        child: const Icon(Icons.add),
       ),
     );
   }

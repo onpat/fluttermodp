@@ -18,7 +18,6 @@ import android.media.session.PlaybackState
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
-import io.flutter.FlutterInjector
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.concurrent.thread
 import kotlin.math.max
@@ -28,7 +27,6 @@ class PlaybackService : Service() {
         private const val TAG = "fluttermodp/playback"
         private const val NOTIFICATION_CHANNEL_ID = "mod_playback"
         private const val NOTIFICATION_ID = 1001
-        private const val MODULE_ASSET = "assets/cavern.mod"
         private const val SAMPLE_RATE = 48000
         private const val CHANNEL_COUNT = 2
         private const val RENDER_CHUNK_FRAMES = 8192
@@ -39,6 +37,8 @@ class PlaybackService : Service() {
         const val ACTION_STOP = "net.klovnin.fluttermodp.action.STOP"
         const val ACTION_SEEK = "net.klovnin.fluttermodp.action.SEEK"
         const val EXTRA_POSITION_MS = "position_ms"
+        const val EXTRA_URI = "module_uri"
+        const val EXTRA_NAME = "module_name"
 
         @Volatile
         var statusMessage: String = "Playback service has not started."
@@ -61,6 +61,8 @@ class PlaybackService : Service() {
     private lateinit var audioManager: AudioManager
     private lateinit var mediaSession: MediaSession
     private var audioFocusRequest: AudioFocusRequest? = null
+    @Volatile private var moduleName = "selected module"
+    @Volatile private var moduleUri: String? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -71,7 +73,11 @@ class PlaybackService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action ?: ACTION_START) {
-            ACTION_START -> startPlayback()
+            ACTION_START -> {
+                moduleUri = intent?.getStringExtra(EXTRA_URI)
+                moduleName = intent?.getStringExtra(EXTRA_NAME) ?: "selected module"
+                startPlayback()
+            }
             ACTION_PLAY -> resumePlayback()
             ACTION_PAUSE -> if (running) pausePlayback() else stopSelf()
             ACTION_STOP -> stopPlayback(removeNotification = true)
@@ -132,10 +138,10 @@ class PlaybackService : Service() {
     private fun playbackLoop() {
         android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_AUDIO)
         try {
-            val assetKey = FlutterInjector.instance()
-                .flutterLoader()
-                .getLookupKeyForAsset(MODULE_ASSET)
-            val moduleData = assets.open(assetKey).use { it.readBytes() }
+            val uri = moduleUri ?: throw IllegalStateException("再生するファイルが指定されていません。")
+            val moduleData = contentResolver.openInputStream(android.net.Uri.parse(uri))?.use {
+                it.readBytes()
+            } ?: throw IllegalStateException("ファイルを読み込めませんでした。")
             if (!NativeOpenMpt.nativeInitializeModule(moduleData)) {
                 throw IllegalStateException(NativeOpenMpt.nativeGetLastMessage())
             }
@@ -349,7 +355,7 @@ class PlaybackService : Service() {
         val durationMs = (NativeOpenMpt.nativeGetDurationSeconds() * 1000.0).toLong()
         mediaSession.setMetadata(
             MediaMetadata.Builder()
-                .putString(MediaMetadata.METADATA_KEY_TITLE, "cavern.mod")
+                .putString(MediaMetadata.METADATA_KEY_TITLE, moduleName)
                 .putString(MediaMetadata.METADATA_KEY_ARTIST, "libopenmpt")
                 .putLong(MediaMetadata.METADATA_KEY_DURATION, durationMs)
                 .build(),
@@ -397,7 +403,7 @@ class PlaybackService : Service() {
         }
         return builder
             .setSmallIcon(R.mipmap.ic_launcher)
-            .setContentTitle("cavern.mod")
+            .setContentTitle(moduleName)
             .setContentText(text)
             .setContentIntent(contentIntent)
             .setCategory(Notification.CATEGORY_TRANSPORT)
