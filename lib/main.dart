@@ -1,8 +1,10 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_pcm_sound/flutter_pcm_sound.dart';
 
-import 'openmpt_ffi.dart';
-
+const _openMptChannel = MethodChannel('net.klovnin.fluttermodp/libopenmpt');
 const _sampleRate = 48000;
 const _channelCount = 2;
 const _feedThresholdFrames = 4096;
@@ -12,7 +14,6 @@ bool _isPlaybackActive = false;
 bool _isFeeding = false;
 bool _feedRequested = false;
 bool _hasQueuedFirstBuffer = false;
-OpenMptDecoder? _decoder;
 
 class _InitializationResult {
   const _InitializationResult({required this.success, required this.message});
@@ -22,11 +23,26 @@ class _InitializationResult {
 }
 
 Future<_InitializationResult> _initializeOpenMpt() async {
+  if (!Platform.isAndroid) {
+    return const _InitializationResult(
+      success: false,
+      message: 'libopenmpt initialization is skipped outside Android.',
+    );
+  }
+
   try {
-    final decoder = await OpenMptDecoder.fromAsset('assets/cavern.mod');
-    _decoder = decoder;
-    debugPrint('[libopenmpt] SUCCESS: ${decoder.description}');
-    return _InitializationResult(success: true, message: decoder.description);
+    final result = await _openMptChannel.invokeMapMethod<String, Object?>(
+      'initialize',
+    );
+    final success = result?['success'] == true;
+    final message =
+        result?['message'] as String? ?? 'No native result returned.';
+    debugPrint('[libopenmpt] ${success ? 'SUCCESS' : 'ERROR'}: $message');
+    return _InitializationResult(success: success, message: message);
+  } on PlatformException catch (error) {
+    final message = 'Platform initialization failed: ${error.message}';
+    debugPrint('[libopenmpt] ERROR: $message');
+    return _InitializationResult(success: false, message: message);
   } catch (error, stackTrace) {
     final message = 'Unexpected initialization failure: $error';
     debugPrint('[libopenmpt] ERROR: $message');
@@ -40,30 +56,29 @@ Future<void> _feedOpenMpt(int remainingFrames) async {
     return;
   }
   if (_isFeeding) {
-    // A feed event can arrive while the previous PCM buffer is being queued.
-    // Remember it so flutter_pcm_sound's one-shot event is not lost.
+    // A feed event can race with completion of the previous MethodChannel
+    // call. Remember it so flutter_pcm_sound's one-shot event is not lost.
     _feedRequested = true;
     return;
   }
 
   _isFeeding = true;
   try {
-    final pcmBytes = _decoder?.renderStereo(
-      frameCount: _renderChunkFrames,
-      sampleRate: _sampleRate,
-    );
+    final pcmBytes = await _openMptChannel.invokeMethod<Uint8List>('render', {
+      'frameCount': _renderChunkFrames,
+      'sampleRate': _sampleRate,
+    });
 
     if (pcmBytes == null || pcmBytes.isEmpty) {
       _isPlaybackActive = false;
       FlutterPcmSound.setFeedCallback(null);
-      _decoder?.dispose();
-      _decoder = null;
       debugPrint('[libopenmpt] PLAYBACK: cavern.mod finished.');
       return;
     }
 
     // flutter_pcm_sound expects signed 16-bit interleaved PCM in host endian.
-    final pcm = pcmBytes;
+    // Copy into an offset-zero buffer because its feed API reads the full buffer.
+    final pcm = Uint8List.fromList(pcmBytes);
     await FlutterPcmSound.feed(PcmArrayInt16(bytes: pcm.buffer.asByteData()));
     if (!_hasQueuedFirstBuffer) {
       _hasQueuedFirstBuffer = true;
@@ -75,8 +90,6 @@ Future<void> _feedOpenMpt(int remainingFrames) async {
   } catch (error, stackTrace) {
     _isPlaybackActive = false;
     FlutterPcmSound.setFeedCallback(null);
-    _decoder?.dispose();
-    _decoder = null;
     debugPrint('[libopenmpt] PLAYBACK ERROR: $error');
     debugPrintStack(stackTrace: stackTrace);
   } finally {
@@ -108,8 +121,6 @@ Future<String> _startPlayback() async {
     return message;
   } catch (error, stackTrace) {
     _isPlaybackActive = false;
-    _decoder?.dispose();
-    _decoder = null;
     final message = 'PCM output initialization failed: $error';
     debugPrint('[libopenmpt] PLAYBACK ERROR: $message');
     debugPrintStack(stackTrace: stackTrace);
@@ -121,7 +132,7 @@ Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   final initialization = await _initializeOpenMpt();
   var startupMessage = initialization.message;
-  if (initialization.success) {
+  if (Platform.isAndroid && initialization.success) {
     startupMessage = '$startupMessage\n${await _startPlayback()}';
   }
   runApp(FlutterModp(initializationMessage: startupMessage));

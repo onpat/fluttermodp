@@ -1,24 +1,17 @@
 # fluttermodp
 
-Flutter MOD playback using libopenmpt through Dart FFI.
+A new Flutter project.
 
-The shared decoder source is located at `src/libopenmpt`. Android builds it as
-`libopenmpt.so` with CMake. iOS builds the same source as the local
-`OpenMptNative` Swift package and embeds its dynamic framework in the app.
+## Getting Started
 
-At runtime, `lib/openmpt_ffi.dart` loads the module asset and renders signed
-16-bit interleaved stereo PCM. `flutter_pcm_sound` queues that PCM to the native
-audio output on Android and iOS.
+This project is a starting point for a Flutter application.
 
-```text
-assets/cavern.mod
-  -> Dart FFI
-  -> libopenmpt
-  -> PCM int16 stereo
-  -> flutter_pcm_sound
-  -> device audio output
-```
+A few resources to get you started if this is your first Flutter project:
 
-Android can be built with `flutter build apk`. An iOS build requires macOS and
-Xcode because the local Swift package compiles libopenmpt for the selected iOS
-device or simulator architecture.
+- [Learn Flutter](https://docs.flutter.dev/get-started/learn-flutter)
+- [Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
+- [Flutter learning resources](https://docs.flutter.dev/reference/learning-resources)
+
+For help getting started with Flutter development, view the
+[online documentation](https://docs.flutter.dev/), which offers tutorials,
+samples, guidance on mobile development, and a full API reference.
