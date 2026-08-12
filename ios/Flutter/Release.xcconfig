@@ -1,1 +1,4 @@
 #include "Generated.xcconfig"
+// Dart resolves libopenmpt at runtime, so keep the framework load command even
+// though the native linker cannot see a direct source-level reference.
+OTHER_LDFLAGS=$(inherited) -Wl,-needed_framework,OpenMptNative

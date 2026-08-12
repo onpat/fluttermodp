@@ -1,57 +1,55 @@
 cmake_minimum_required(VERSION 3.22.1)
 
-project(fluttermodp_android LANGUAGES C)
+project(fluttermodp_android LANGUAGES C CXX)
 
 if(NOT ANDROID)
     message(FATAL_ERROR "This native build is only supported on Android.")
 endif()
 
-set(OPENMPT_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/libopenmpt")
-set(OPENMPT_ANDROID_MK "${OPENMPT_ROOT}/build/android_ndk/Android.mk")
-set(OPENMPT_APPLICATION_MK "${OPENMPT_ROOT}/build/android_ndk/Application.mk")
-set(OPENMPT_NDK_OUT "${CMAKE_CURRENT_BINARY_DIR}/libopenmpt/obj")
-set(OPENMPT_LIBS_OUT "${CMAKE_CURRENT_BINARY_DIR}/libopenmpt/libs")
-set(OPENMPT_LIBRARY "${OPENMPT_LIBS_OUT}/${ANDROID_ABI}/libopenmpt.so")
-
-# libopenmpt ships an Android NDK Makefile. Keep that build authoritative and
-# invoke it from CMake so a normal Flutter/Gradle build also builds libopenmpt.
-file(GLOB_RECURSE OPENMPT_BUILD_INPUTS CONFIGURE_DEPENDS
-    "${OPENMPT_ROOT}/*.c"
-    "${OPENMPT_ROOT}/*.cpp"
-    "${OPENMPT_ROOT}/*.h"
-    "${OPENMPT_ROOT}/*.hpp"
-    "${OPENMPT_ROOT}/*.inc"
+# Keep the third-party decoder outside either platform project. The same source
+# tree can then be compiled for iOS without maintaining an Android-only copy.
+get_filename_component(
+    OPENMPT_ROOT
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../src/libopenmpt"
+    ABSOLUTE
 )
 
-add_custom_command(
-    OUTPUT "${OPENMPT_LIBRARY}"
-    COMMAND "${ANDROID_NDK}/ndk-build"
-        -j4
-        "NDK_PROJECT_PATH=${OPENMPT_ROOT}"
-        "APP_BUILD_SCRIPT=${OPENMPT_ANDROID_MK}"
-        "NDK_APPLICATION_MK=${OPENMPT_APPLICATION_MK}"
-        "NDK_OUT=${OPENMPT_NDK_OUT}"
-        "NDK_LIBS_OUT=${OPENMPT_LIBS_OUT}"
-        "APP_ABI=${ANDROID_ABI}"
-        "APP_PLATFORM=${ANDROID_PLATFORM}"
-        "LOCAL_PATH=${OPENMPT_ROOT}"
-    WORKING_DIRECTORY "${OPENMPT_ROOT}"
-    DEPENDS
-        "${OPENMPT_ANDROID_MK}"
-        "${OPENMPT_APPLICATION_MK}"
-        ${OPENMPT_BUILD_INPUTS}
-    COMMENT "Building libopenmpt with its Android NDK Makefile (${ANDROID_ABI})"
-    VERBATIM
+file(GLOB OPENMPT_SOURCES CONFIGURE_DEPENDS
+    "${OPENMPT_ROOT}/common/*.cpp"
+    "${OPENMPT_ROOT}/libopenmpt/*.cpp"
+    "${OPENMPT_ROOT}/sounddsp/*.cpp"
+    "${OPENMPT_ROOT}/soundlib/*.cpp"
+    "${OPENMPT_ROOT}/soundlib/plugins/*.cpp"
+    "${OPENMPT_ROOT}/soundlib/plugins/dmo/*.cpp"
 )
 
-add_custom_target(openmpt_make DEPENDS "${OPENMPT_LIBRARY}")
+add_library(openmpt SHARED ${OPENMPT_SOURCES})
 
-add_library(openmpt SHARED IMPORTED GLOBAL)
 set_target_properties(openmpt PROPERTIES
-    IMPORTED_LOCATION "${OPENMPT_LIBRARY}"
+    CXX_STANDARD 20
+    CXX_STANDARD_REQUIRED YES
+    CXX_EXTENSIONS NO
 )
 
-add_library(openmpt_bridge SHARED openmpt_bridge.c)
-add_dependencies(openmpt_bridge openmpt_make)
-target_include_directories(openmpt_bridge PRIVATE "${OPENMPT_ROOT}")
-target_link_libraries(openmpt_bridge PRIVATE openmpt log)
+target_compile_definitions(openmpt PRIVATE
+    LIBOPENMPT_BUILD
+    LIBOPENMPT_BUILD_DLL
+    MPT_WITH_ZLIB
+)
+
+target_compile_options(openmpt PRIVATE
+    -fexceptions
+    -frtti
+    -fvisibility=hidden
+    -Wall
+)
+
+target_include_directories(openmpt
+    PUBLIC "${OPENMPT_ROOT}"
+    PRIVATE
+        "${OPENMPT_ROOT}/common"
+        "${OPENMPT_ROOT}/src"
+)
+
+find_library(Z_LIBRARY z REQUIRED)
+target_link_libraries(openmpt PRIVATE "${Z_LIBRARY}")
