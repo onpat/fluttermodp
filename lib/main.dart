@@ -3,7 +3,23 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+// Imported to keep the background HTTP server entrypoint reachable by the
+// Dart compiler (tree-shaking). It is started from the Kotlin service via
+// FlutterEngine.executeDartEntrypoint("httpServerEntrypoint").
+import 'remote/http_server.dart' as remote;
+
 const _openMptChannel = MethodChannel('net.klovnin.fluttermodp/libopenmpt');
+
+/// Root-library entrypoint started by [PlaybackService] via
+/// `FlutterEngine.executeDartEntrypoint("httpServerEntrypoint")`.
+///
+/// The Flutter engine resolves non-`main` entrypoints only in the root
+/// library (the file containing `main()`), so this wrapper must live here
+/// rather than in `lib/remote/http_server.dart`.
+@pragma('vm:entry-point')
+void httpServerEntrypoint() {
+  remote.httpServerEntrypoint();
+}
 
 class _InitializationResult {
   const _InitializationResult({required this.success, required this.message});
@@ -33,6 +49,9 @@ class PlaylistState {
     this.isPlaying = false,
     this.isPaused = false,
     this.status = 'プレイリストを読み込んでいます…',
+    this.httpServerRunning = false,
+    this.httpServerPort = 0,
+    this.httpServerAddress,
   });
 
   final List<PlaylistEntry> entries;
@@ -42,6 +61,9 @@ class PlaylistState {
   final bool isPlaying;
   final bool isPaused;
   final String status;
+  final bool httpServerRunning;
+  final int httpServerPort;
+  final String? httpServerAddress;
 
   factory PlaylistState.fromMap(Map<Object?, Object?> map) {
     final rawEntries = map['entries'] as List<Object?>? ?? const [];
@@ -56,6 +78,9 @@ class PlaylistState {
       isPlaying: map['isPlaying'] == true,
       isPaused: map['isPaused'] == true,
       status: map['status'] as String? ?? '状態を取得できません。',
+      httpServerRunning: map['httpServerRunning'] == true,
+      httpServerPort: (map['httpServerPort'] as num?)?.toInt() ?? 0,
+      httpServerAddress: map['httpServerAddress'] as String?,
     );
   }
 }
@@ -133,10 +158,12 @@ class _MyHomePageState extends State<MyHomePage> {
   bool _busy = false;
   bool _refreshing = false;
   String? _operationMessage;
+  late final TextEditingController _httpPortController;
 
   @override
   void initState() {
     super.initState();
+    _httpPortController = TextEditingController(text: '8080');
     _refreshState();
     _stateTimer = Timer.periodic(
       const Duration(milliseconds: 750),
@@ -147,7 +174,13 @@ class _MyHomePageState extends State<MyHomePage> {
   @override
   void dispose() {
     _stateTimer?.cancel();
+    _httpPortController.dispose();
     super.dispose();
+  }
+
+  int get _httpPort {
+    final value = int.tryParse(_httpPortController.text.trim());
+    return (value != null && value > 0 && value < 65536) ? value : 8080;
   }
 
   Future<void> _refreshState({bool quiet = false}) async {
@@ -316,6 +349,58 @@ class _MyHomePageState extends State<MyHomePage> {
                   ),
                 ),
               ],
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+              child: Card(
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      SwitchListTile(
+                        dense: true,
+                        contentPadding: EdgeInsets.zero,
+                        title: const Text('HTTPリモコン'),
+                        subtitle: Text(
+                          _playlist.httpServerRunning
+                              ? '${_playlist.httpServerAddress ?? '0.0.0.0'}:${_playlist.httpServerPort}'
+                              : '再生・プレイリストを遠隔操作できます',
+                        ),
+                        value: _playlist.httpServerRunning,
+                        onChanged: (enabled) async {
+                          if (enabled) {
+                            await _invoke(
+                              'startHttpServer',
+                              arguments: {'port': _httpPort},
+                            );
+                          } else {
+                            await _invoke('stopHttpServer');
+                          }
+                        },
+                      ),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: TextField(
+                              controller: _httpPortController,
+                              keyboardType: TextInputType.number,
+                              enabled: !_playlist.httpServerRunning,
+                              decoration: const InputDecoration(
+                                labelText: 'ポート',
+                                hintText: '8080',
+                                border: OutlineInputBorder(),
+                                isDense: true,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                    ],
+                  ),
+                ),
+              ),
             ),
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 12),

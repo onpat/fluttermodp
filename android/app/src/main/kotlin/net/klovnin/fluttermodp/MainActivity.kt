@@ -124,6 +124,17 @@ class MainActivity : FlutterActivity() {
                         }
                     }
                     "status" -> result.success(PlaybackService.statusMessage)
+                    "startHttpServer" -> {
+                        val port = call.argument<Number>("port")?.toInt() ?: 8080
+                        startPlaybackService(PlaybackService.ACTION_START_HTTP, httpPort = port)
+                        result.success(true)
+                    }
+                    "stopHttpServer" -> {
+                        if (PlaybackService.isHttpServerRunning || PlaybackService.isRunning) {
+                            startService(PlaybackService.intent(this, PlaybackService.ACTION_STOP_HTTP))
+                        }
+                        result.success(true)
+                    }
                     else -> result.notImplemented()
                 }
             }
@@ -268,7 +279,7 @@ class MainActivity : FlutterActivity() {
         return Uri.decode(uri.lastPathSegment ?: "selected module")
     }
 
-    private fun stateWithMessage(message: String): Map<String, Any> =
+    private fun stateWithMessage(message: String): Map<String, Any?> =
         PlaybackService.state(this).toMutableMap().apply {
             this["message"] = message
         }
@@ -305,11 +316,13 @@ class MainActivity : FlutterActivity() {
         uri: String? = null,
         name: String? = null,
         index: Int? = null,
+        httpPort: Int? = null,
     ) {
         val intent = PlaybackService.intent(this, action).apply {
             if (uri != null) putExtra(PlaybackService.EXTRA_URI, uri)
             if (name != null) putExtra(PlaybackService.EXTRA_NAME, name)
             if (index != null) putExtra(PlaybackService.EXTRA_INDEX, index)
+            if (httpPort != null) putExtra(PlaybackService.EXTRA_PORT, httpPort)
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(intent) else startService(intent)
     }

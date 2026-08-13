@@ -17,7 +17,14 @@ import android.media.session.MediaSession
 import android.media.session.PlaybackState
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import android.util.Log
+import io.flutter.FlutterInjector
+import io.flutter.embedding.engine.FlutterEngine
+import io.flutter.embedding.engine.dart.DartExecutor
+import io.flutter.plugin.common.MethodCall
+import io.flutter.plugin.common.MethodChannel
+import java.net.NetworkInterface
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.concurrent.thread
@@ -46,10 +53,22 @@ class PlaybackService : Service() {
         const val ACTION_PLAYLIST_CHANGED = "net.klovnin.fluttermodp.action.PLAYLIST_CHANGED"
         const val ACTION_REPEAT_CHANGED = "net.klovnin.fluttermodp.action.REPEAT_CHANGED"
         const val ACTION_SEEK = "net.klovnin.fluttermodp.action.SEEK"
+        const val ACTION_START_HTTP = "net.klovnin.fluttermodp.action.START_HTTP"
+        const val ACTION_STOP_HTTP = "net.klovnin.fluttermodp.action.STOP_HTTP"
         const val EXTRA_POSITION_MS = "position_ms"
         const val EXTRA_INDEX = "playlist_index"
         const val EXTRA_URI = "module_uri"
         const val EXTRA_NAME = "module_name"
+        const val EXTRA_PORT = "http_port"
+        const val HTTP_SERVER_CHANNEL = "net.klovnin.fluttermodp/http_server"
+        const val PLAYER_CHANNEL = "net.klovnin.fluttermodp/player"
+
+        @Volatile var isHttpServerRunning: Boolean = false
+            private set
+        @Volatile var httpServerPort: Int = 0
+            private set
+        @Volatile var httpServerAddress: String? = null
+            private set
 
         @Volatile var statusMessage: String = "再生停止中"
             private set
@@ -63,10 +82,10 @@ class PlaybackService : Service() {
         fun intent(context: Context, action: String): Intent =
             Intent(context, PlaybackService::class.java).setAction(action)
 
-        fun state(context: Context): Map<String, Any> {
+        fun state(context: Context): Map<String, Any?> {
             val snapshot = PlaylistStore(context).snapshot()
             val index = if (isRunning) activeIndex else snapshot.currentIndex
-            return mapOf(
+            return mapOf<String, Any?>(
                 "entries" to snapshot.entries.map(PlaylistEntry::toMap),
                 "currentIndex" to index,
                 "repeatOne" to snapshot.repeatOne,
@@ -74,8 +93,30 @@ class PlaybackService : Service() {
                 "isPlaying" to (isRunning && !isPaused),
                 "isPaused" to (isRunning && isPaused),
                 "status" to statusMessage,
+                "httpServerRunning" to isHttpServerRunning,
+                "httpServerPort" to httpServerPort,
+                "httpServerAddress" to httpServerAddress,
             )
         }
+
+        fun localIpAddresses(): List<String> = buildList {
+            try {
+                NetworkInterface.getNetworkInterfaces()?.asSequence()
+                    ?.filter { it.isUp && !it.isLoopback }
+                    ?.forEach { intf ->
+                        intf.inetAddresses.asSequence()
+                            .filter { !it.isLoopbackAddress && it.hostAddress?.contains(':') == false }
+                            .mapNotNull { it.hostAddress }
+                            .forEach { add(it) }
+                    }
+            } catch (_: Exception) {
+                // Best-effort enumeration; ignore failures.
+            }
+        }
+
+        fun preferredLocalAddress(): String? =
+            localIpAddresses().firstOrNull { it.startsWith("192.168.") || it.startsWith("10.") }
+                ?: localIpAddresses().firstOrNull()
     }
 
     private val stateLock = Object()
@@ -94,6 +135,11 @@ class PlaybackService : Service() {
     private var audioFocusRequest: AudioFocusRequest? = null
     @Volatile private var moduleName = "MOD player"
 
+    private var httpEngine: FlutterEngine? = null
+    private var httpChannel: MethodChannel? = null
+    private var wakeLock: PowerManager.WakeLock? = null
+    @Volatile private var httpPort: Int = 8080
+
     override fun onCreate() {
         super.onCreate()
         playlistStore = PlaylistStore(this)
@@ -111,6 +157,7 @@ class PlaybackService : Service() {
                 ACTION_NEXT,
                 ACTION_PREVIOUS,
                 ACTION_PLAY_INDEX,
+                ACTION_START_HTTP,
             )
         ) {
             // A command may arrive through startForegroundService while the
@@ -140,6 +187,11 @@ class PlaybackService : Service() {
                     stopSelf()
                 }
             }
+            ACTION_START_HTTP -> {
+                httpPort = intent?.getIntExtra(EXTRA_PORT, 8080) ?: 8080
+                startHttpServer()
+            }
+            ACTION_STOP_HTTP -> stopHttpServer()
         }
         return START_NOT_STICKY
     }
@@ -151,6 +203,7 @@ class PlaybackService : Service() {
         isPaused = false
         synchronized(stateLock) { stateLock.notifyAll() }
         playbackThread?.takeIf { it !== Thread.currentThread() }?.join(2000)
+        disposeHttp()
         mediaSession.release()
         super.onDestroy()
     }
@@ -173,8 +226,8 @@ class PlaybackService : Service() {
             statusMessage = "プレイリストが空のため停止しています。"
             activeIndex = -1
             isPaused = false
-            stopForeground(STOP_FOREGROUND_REMOVE)
-            stopSelf()
+            if (!isHttpServerRunning) stopForeground(STOP_FOREGROUND_REMOVE)
+            finishIfIdle()
             return
         }
 
@@ -299,8 +352,8 @@ class PlaybackService : Service() {
             abandonAudioFocus()
             updatePlaybackState(PlaybackState.STATE_STOPPED)
             mediaSession.isActive = false
-            stopForeground(STOP_FOREGROUND_REMOVE)
-            stopSelf()
+            if (!isHttpServerRunning) stopForeground(STOP_FOREGROUND_REMOVE)
+            finishIfIdle()
         }
     }
 
@@ -431,7 +484,7 @@ class PlaybackService : Service() {
 
     private fun pausePlayback() {
         if (!isRunning || isPaused) {
-            if (!isRunning) stopSelf()
+            if (!isRunning && !isHttpServerRunning) stopSelf()
             return
         }
         resumeOnFocusGain = false
@@ -477,8 +530,10 @@ class PlaybackService : Service() {
             "再生停止中"
         }
         updatePlaybackState(PlaybackState.STATE_STOPPED)
-        if (removeNotification) stopForeground(STOP_FOREGROUND_REMOVE)
-        stopSelf()
+        if (removeNotification && !isHttpServerRunning) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+        }
+        finishIfIdle()
     }
 
     private fun failPlayback(message: String) {
@@ -486,8 +541,8 @@ class PlaybackService : Service() {
         Log.e(TAG, message)
         isRunning = false
         updatePlaybackState(PlaybackState.STATE_ERROR)
-        stopForeground(STOP_FOREGROUND_REMOVE)
-        stopSelf()
+        if (!isHttpServerRunning) stopForeground(STOP_FOREGROUND_REMOVE)
+        finishIfIdle()
     }
 
     private fun createAudioTrack(): AudioTrack {
@@ -608,7 +663,7 @@ class PlaybackService : Service() {
             .setCategory(Notification.CATEGORY_TRANSPORT)
             .setVisibility(Notification.VISIBILITY_PUBLIC)
             .setOnlyAlertOnce(true)
-            .setOngoing(isRunning && !isPaused)
+            .setOngoing((isRunning && !isPaused) || isHttpServerRunning)
             .addAction(Notification.Action.Builder(android.R.drawable.ic_media_previous, "Previous", servicePendingIntent(ACTION_PREVIOUS, 1)).build())
             .addAction(Notification.Action.Builder(toggleIcon, toggleLabel, servicePendingIntent(toggleAction, 2)).build())
             .addAction(Notification.Action.Builder(android.R.drawable.ic_media_next, "Next", servicePendingIntent(ACTION_NEXT, 3)).build())
@@ -618,7 +673,7 @@ class PlaybackService : Service() {
     }
 
     private fun updateNotification(text: String) {
-        if (!isRunning) return
+        if (!isRunning && !isHttpServerRunning) return
         getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, buildNotification(text))
     }
 
@@ -684,6 +739,175 @@ class PlaybackService : Service() {
             audioFocusRequest?.let(audioManager::abandonAudioFocusRequest)
         } else {
             @Suppress("DEPRECATION") audioManager.abandonAudioFocus(focusChangeListener)
+        }
+    }
+
+    private fun startHttpServer() {
+        if (isHttpServerRunning) return
+        val engine = httpEngine ?: createHttpEngine()
+        acquireWakeLock()
+        val port = httpPort
+        httpChannel = MethodChannel(engine.dartExecutor.binaryMessenger, HTTP_SERVER_CHANNEL)
+        httpChannel?.invokeMethod(
+            "startServer",
+            mapOf("port" to port),
+            object : MethodChannel.Result {
+                override fun success(result: Any?) {
+                    val data = result as? Map<*, *>
+                    if (data?.get("success") == true) {
+                        isHttpServerRunning = true
+                        httpServerPort = (data["port"] as? Number)?.toInt() ?: port
+                        httpServerAddress = preferredLocalAddress()
+                        statusMessage = "HTTPリモコン待受中: ${httpServerAddress ?: "0.0.0.0"}:$httpServerPort"
+                        updateNotification(statusMessage)
+                    } else {
+                        handleStartHttpFailure(data?.get("message") as? String)
+                    }
+                }
+
+                override fun error(errorCode: String, errorMessage: String?, errorDetails: Any?) {
+                    handleStartHttpFailure(errorMessage)
+                }
+
+                override fun notImplemented() {
+                    handleStartHttpFailure("HTTP server not implemented")
+                }
+            },
+        )
+    }
+
+    private fun handleStartHttpFailure(message: String?) {
+        releaseWakeLock()
+        isHttpServerRunning = false
+        httpServerPort = 0
+        httpServerAddress = null
+        Log.e(TAG, "startServer failed: $message")
+        if (!isRunning) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+        }
+    }
+
+    private fun createHttpEngine(): FlutterEngine {
+        val engine = FlutterEngine(this)
+        engine.dartExecutor.executeDartEntrypoint(
+            DartExecutor.DartEntrypoint(
+                FlutterInjector.instance().flutterLoader().findAppBundlePath(),
+                "httpServerEntrypoint",
+            ),
+        )
+        MethodChannel(engine.dartExecutor.binaryMessenger, PLAYER_CHANNEL)
+            .setMethodCallHandler { call, result -> handlePlayerMethod(call, result) }
+        httpEngine = engine
+        return engine
+    }
+
+    private fun stopHttpServer() {
+        disposeHttp()
+        if (isRunning) {
+            updateNotification(statusMessage)
+        } else {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+        }
+    }
+
+    private fun disposeHttp() {
+        httpChannel?.invokeMethod("stopServer", null)
+        httpChannel?.setMethodCallHandler(null)
+        httpChannel = null
+        httpEngine?.destroy()
+        httpEngine = null
+        releaseWakeLock()
+        isHttpServerRunning = false
+        httpServerPort = 0
+        httpServerAddress = null
+    }
+
+    private fun finishIfIdle() {
+        if (isHttpServerRunning) {
+            updateNotification(statusMessage)
+            return
+        }
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
+    }
+
+    private fun acquireWakeLock() {
+        if (wakeLock?.isHeld == true) return
+        val lock = getSystemService(PowerManager::class.java)
+            .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "$TAG:http")
+        lock.setReferenceCounted(false)
+        lock.acquire()
+        wakeLock = lock
+    }
+
+    private fun releaseWakeLock() {
+        if (wakeLock?.isHeld == true) wakeLock?.release()
+        wakeLock = null
+    }
+
+    private fun handlePlayerMethod(call: MethodCall, result: MethodChannel.Result) {
+        when (call.method) {
+            "getState" -> result.success(state(this))
+            "play" -> {
+                resumePlayback()
+                result.success(true)
+            }
+            "pause" -> {
+                pausePlayback()
+                result.success(true)
+            }
+            "stop" -> {
+                stopPlayback(removeNotification = true)
+                result.success(true)
+            }
+            "next" -> {
+                skipBy(1)
+                result.success(true)
+            }
+            "previous" -> {
+                skipBy(-1)
+                result.success(true)
+            }
+            "seek" -> {
+                val positionMs = call.argument<Number>("positionMs")?.toLong() ?: -1L
+                if (positionMs < 0L) {
+                    result.error("invalid_arguments", "positionMs must be non-negative", null)
+                } else {
+                    if (isRunning) {
+                        pendingSeekMs.set(positionMs)
+                        audioTrack?.pause()
+                        synchronized(stateLock) { stateLock.notifyAll() }
+                    }
+                    result.success(true)
+                }
+            }
+            "playIndex" -> {
+                playIndex(call.argument<Number>("index")?.toInt() ?: -1)
+                result.success(true)
+            }
+            "removeTrack" -> {
+                playlistStore.remove(call.argument<Number>("index")?.toInt() ?: -1)
+                playlistChanged()
+                result.success(true)
+            }
+            "clearPlaylist" -> {
+                playlistStore.clear()
+                playlistChanged()
+                result.success(true)
+            }
+            "setRepeatOne" -> {
+                playlistStore.setRepeatOne(call.argument<Boolean>("enabled") == true)
+                repeatChanged()
+                result.success(true)
+            }
+            "setRepeatPlaylist" -> {
+                playlistStore.setRepeatPlaylist(call.argument<Boolean>("enabled") == true)
+                repeatChanged()
+                result.success(true)
+            }
+            else -> result.notImplemented()
         }
     }
 }
