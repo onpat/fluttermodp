@@ -35,12 +35,10 @@ class PlaybackService : Service() {
         private const val TAG = "fluttermodp/playback"
         private const val NOTIFICATION_CHANNEL_ID = "mod_playback"
         private const val NOTIFICATION_ID = 1001
-        private const val SAMPLE_RATE = 48000
         private const val CHANNEL_COUNT = 2
         // Render 500 ms at a time. AudioTrack holds two chunks (about one
         // second), reducing JNI calls and playback-thread wakeups while
         // retaining responsive transport controls.
-        private const val RENDER_CHUNK_FRAMES = SAMPLE_RATE / 2
         private const val STATE_UPDATE_CHUNKS = 2
 
         const val ACTION_START = "net.klovnin.fluttermodp.action.START"
@@ -55,6 +53,7 @@ class PlaybackService : Service() {
         const val ACTION_SEEK = "net.klovnin.fluttermodp.action.SEEK"
         const val ACTION_START_HTTP = "net.klovnin.fluttermodp.action.START_HTTP"
         const val ACTION_STOP_HTTP = "net.klovnin.fluttermodp.action.STOP_HTTP"
+        const val ACTION_RENDER_SETTINGS_CHANGED = "net.klovnin.fluttermodp.action.RENDER_SETTINGS_CHANGED"
         const val EXTRA_POSITION_MS = "position_ms"
         const val EXTRA_INDEX = "playlist_index"
         const val EXTRA_URI = "module_uri"
@@ -132,6 +131,7 @@ class PlaybackService : Service() {
     private lateinit var audioManager: AudioManager
     private lateinit var mediaSession: MediaSession
     private lateinit var playlistStore: PlaylistStore
+    private lateinit var renderSettingsStore: RenderSettingsStore
     private var audioFocusRequest: AudioFocusRequest? = null
     @Volatile private var moduleName = "MOD player"
 
@@ -143,6 +143,7 @@ class PlaybackService : Service() {
     override fun onCreate() {
         super.onCreate()
         playlistStore = PlaylistStore(this)
+        renderSettingsStore = RenderSettingsStore(this)
         audioManager = getSystemService(AudioManager::class.java)
         createNotificationChannel()
         createMediaSession()
@@ -192,6 +193,7 @@ class PlaybackService : Service() {
                 startHttpServer()
             }
             ACTION_STOP_HTTP -> stopHttpServer()
+            ACTION_RENDER_SETTINGS_CHANGED -> applyRenderSettingsToModule()
         }
         return START_NOT_STICKY
     }
@@ -256,7 +258,11 @@ class PlaybackService : Service() {
         android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_AUDIO)
         var track: AudioTrack? = null
         try {
-            track = createAudioTrack().also { audioTrack = it }
+            val audioSettings = renderSettingsStore.snapshot()
+            val sampleRate = audioSettings.sampleRate.coerceIn(8000, 192000)
+            val floatOutput = audioSettings.floatOutput
+            val chunkFrames = (sampleRate / 2).coerceAtLeast(1)
+            track = createAudioTrack(sampleRate, floatOutput, chunkFrames).also { audioTrack = it }
             while (isRunning) {
                 val snapshot = playlistStore.snapshot()
                 if (snapshot.entries.isEmpty()) {
@@ -276,6 +282,7 @@ class PlaybackService : Service() {
                     throw IllegalStateException(NativeOpenMpt.nativeGetLastMessage())
                 }
                 NativeOpenMpt.nativeSetRepeatCount(if (snapshot.repeatOne) -1 else 0)
+                NativeOpenMpt.applyModuleSettings(renderSettingsStore.snapshot())
 
                 prepared = true
                 statusMessage = "再生中: ${entry.name}"
@@ -292,7 +299,7 @@ class PlaybackService : Service() {
                     if (!isRunning || requestedIndex.get() >= 0) break
                     applyPendingSeek(track)
                     if (isPaused) continue
-                    val pcm = NativeOpenMpt.nativeRenderPcm(RENDER_CHUNK_FRAMES, SAMPLE_RATE)
+                    val pcm = NativeOpenMpt.nativeRenderPcm(chunkFrames, sampleRate, floatOutput)
                     if (pcm.isEmpty()) {
                         reachedEnd = true
                         break
@@ -435,6 +442,19 @@ class PlaybackService : Service() {
         updateNotification(if (repeatOne) "1曲リピート" else statusMessage)
     }
 
+    /**
+     * Re-applies module-scoped render/CTL settings to the currently loaded
+     * module. Called both per-track (in the playback loop) and in response to
+     * ACTION_RENDER_SETTINGS_CHANGED. Audio-format settings (sample rate /
+     * bit depth) are owned by the AudioTrack and only take effect on the next
+     * playback start.
+     */
+    private fun applyRenderSettingsToModule() {
+        if (prepared) {
+            NativeOpenMpt.applyModuleSettings(renderSettingsStore.snapshot())
+        }
+    }
+
     private fun waitUntilPlayableOrSeekable() {
         synchronized(stateLock) {
             while (isRunning && isPaused && pendingSeekMs.get() < 0L && requestedIndex.get() < 0) {
@@ -545,21 +565,23 @@ class PlaybackService : Service() {
         finishIfIdle()
     }
 
-    private fun createAudioTrack(): AudioTrack {
+    private fun createAudioTrack(sampleRate: Int, floatOutput: Boolean, chunkFrames: Int): AudioTrack {
+        val encoding = if (floatOutput) AudioFormat.ENCODING_PCM_FLOAT else AudioFormat.ENCODING_PCM_16BIT
+        val bytesPerSample = if (floatOutput) Float.SIZE_BYTES else Short.SIZE_BYTES
         val format = AudioFormat.Builder()
-            .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-            .setSampleRate(SAMPLE_RATE)
+            .setEncoding(encoding)
+            .setSampleRate(sampleRate)
             .setChannelMask(AudioFormat.CHANNEL_OUT_STEREO)
             .build()
         val attributes = AudioAttributes.Builder()
             .setUsage(AudioAttributes.USAGE_MEDIA)
             .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
             .build()
-        val chunkBytes = RENDER_CHUNK_FRAMES * CHANNEL_COUNT * Short.SIZE_BYTES
+        val chunkBytes = chunkFrames * CHANNEL_COUNT * bytesPerSample
         val minBufferBytes = AudioTrack.getMinBufferSize(
-            SAMPLE_RATE,
+            sampleRate,
             AudioFormat.CHANNEL_OUT_STEREO,
-            AudioFormat.ENCODING_PCM_16BIT,
+            encoding,
         )
         val builder = AudioTrack.Builder()
             .setAudioAttributes(attributes)
@@ -578,7 +600,8 @@ class PlaybackService : Service() {
             }
             Log.i(
                 TAG,
-                "AudioTrack ready: chunk=$RENDER_CHUNK_FRAMES frames, " +
+                "AudioTrack ready: chunk=$chunkFrames frames, sampleRate=$sampleRate, " +
+                    "encoding=${if (floatOutput) "float" else "pcm16"}, " +
                     "buffer=${it.bufferSizeInFrames}/${it.bufferCapacityInFrames} frames, " +
                     "performanceMode=$performanceMode",
             )

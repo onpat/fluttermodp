@@ -10,6 +10,16 @@ import 'remote/http_server.dart' as remote;
 
 const _openMptChannel = MethodChannel('net.klovnin.fluttermodp/libopenmpt');
 
+const _interpolationLabels = <int, String>{
+  0: '内部デフォルト',
+  1: '補間なし',
+  2: '線形補間',
+  4: '3次補間 (cubic)',
+  8: '8-tap windowed sinc',
+};
+
+const _sampleRates = <int>[44100, 48000, 88200, 96000, 192000];
+
 /// Root-library entrypoint started by [PlaybackService] via
 /// `FlutterEngine.executeDartEntrypoint("httpServerEntrypoint")`.
 ///
@@ -85,6 +95,88 @@ class PlaylistState {
   }
 }
 
+class RenderSettings {
+  const RenderSettings({
+    this.interpolationFilterLength = 0,
+    this.sampleRate = 48000,
+    this.floatOutput = true,
+    this.volumeRampingStrength = -1,
+    this.tempoFactor = 1.0,
+    this.pitchFactor = 1.0,
+    this.playAtEnd = 'fadeout',
+    this.oplVolumeFactor = 1.0,
+    this.emulateAmiga = false,
+    this.emulateAmigaType = 'auto',
+    this.dither = 1,
+  });
+
+  final int interpolationFilterLength;
+  final int sampleRate;
+  final bool floatOutput;
+  final int volumeRampingStrength;
+  final double tempoFactor;
+  final double pitchFactor;
+  final String playAtEnd;
+  final double oplVolumeFactor;
+  final bool emulateAmiga;
+  final String emulateAmigaType;
+  final int dither;
+
+  factory RenderSettings.fromMap(Map<Object?, Object?> map) => RenderSettings(
+    interpolationFilterLength: (map['interpolationFilterLength'] as num?)?.toInt() ?? 0,
+    sampleRate: (map['sampleRate'] as num?)?.toInt() ?? 48000,
+    floatOutput: map['floatOutput'] as bool? ?? true,
+    volumeRampingStrength: (map['volumeRampingStrength'] as num?)?.toInt() ?? -1,
+    tempoFactor: (map['tempoFactor'] as num?)?.toDouble() ?? 1.0,
+    pitchFactor: (map['pitchFactor'] as num?)?.toDouble() ?? 1.0,
+    playAtEnd: map['playAtEnd'] as String? ?? 'fadeout',
+    oplVolumeFactor: (map['oplVolumeFactor'] as num?)?.toDouble() ?? 1.0,
+    emulateAmiga: map['emulateAmiga'] as bool? ?? false,
+    emulateAmigaType: map['emulateAmigaType'] as String? ?? 'auto',
+    dither: (map['dither'] as num?)?.toInt() ?? 1,
+  );
+
+  RenderSettings copyWith({
+    int? interpolationFilterLength,
+    int? sampleRate,
+    bool? floatOutput,
+    int? volumeRampingStrength,
+    double? tempoFactor,
+    double? pitchFactor,
+    String? playAtEnd,
+    double? oplVolumeFactor,
+    bool? emulateAmiga,
+    String? emulateAmigaType,
+    int? dither,
+  }) => RenderSettings(
+    interpolationFilterLength: interpolationFilterLength ?? this.interpolationFilterLength,
+    sampleRate: sampleRate ?? this.sampleRate,
+    floatOutput: floatOutput ?? this.floatOutput,
+    volumeRampingStrength: volumeRampingStrength ?? this.volumeRampingStrength,
+    tempoFactor: tempoFactor ?? this.tempoFactor,
+    pitchFactor: pitchFactor ?? this.pitchFactor,
+    playAtEnd: playAtEnd ?? this.playAtEnd,
+    oplVolumeFactor: oplVolumeFactor ?? this.oplVolumeFactor,
+    emulateAmiga: emulateAmiga ?? this.emulateAmiga,
+    emulateAmigaType: emulateAmigaType ?? this.emulateAmigaType,
+    dither: dither ?? this.dither,
+  );
+
+  Map<String, Object?> toMap() => <String, Object?>{
+    'interpolationFilterLength': interpolationFilterLength,
+    'sampleRate': sampleRate,
+    'floatOutput': floatOutput,
+    'volumeRampingStrength': volumeRampingStrength,
+    'tempoFactor': tempoFactor,
+    'pitchFactor': pitchFactor,
+    'playAtEnd': playAtEnd,
+    'oplVolumeFactor': oplVolumeFactor,
+    'emulateAmiga': emulateAmiga,
+    'emulateAmigaType': emulateAmigaType,
+    'dither': dither,
+  };
+}
+
 Future<_InitializationResult> _initializeOpenMpt() async {
   try {
     final result = await _openMptChannel.invokeMapMethod<String, Object?>(
@@ -154,6 +246,7 @@ class MyHomePage extends StatefulWidget {
 
 class _MyHomePageState extends State<MyHomePage> {
   PlaylistState _playlist = const PlaylistState();
+  RenderSettings _renderSettings = const RenderSettings();
   Timer? _stateTimer;
   bool _busy = false;
   bool _refreshing = false;
@@ -165,6 +258,7 @@ class _MyHomePageState extends State<MyHomePage> {
     super.initState();
     _httpPortController = TextEditingController(text: '8080');
     _refreshState();
+    _loadRenderSettings();
     _stateTimer = Timer.periodic(
       const Duration(milliseconds: 750),
       (_) => _refreshState(quiet: true),
@@ -257,6 +351,49 @@ class _MyHomePageState extends State<MyHomePage> {
     if (confirmed == true) await _invoke('clearPlaylist');
   }
 
+  Future<void> _loadRenderSettings() async {
+    try {
+      final result = await _openMptChannel.invokeMapMethod<Object?, Object?>(
+        'getRenderSettings',
+      );
+      if (mounted && result != null) {
+        setState(() => _renderSettings = RenderSettings.fromMap(result));
+      }
+    } on MissingPluginException {
+      // Non-Android platforms keep the defaults.
+    } on PlatformException {
+      // Keep the defaults if the native side is unavailable.
+    }
+  }
+
+  Future<void> _updateRenderSettings(RenderSettings settings) async {
+    setState(() => _renderSettings = settings);
+    try {
+      final result = await _openMptChannel.invokeMapMethod<Object?, Object?>(
+        'setRenderSettings',
+        settings.toMap(),
+      );
+      if (mounted && result != null) {
+        setState(() => _renderSettings = RenderSettings.fromMap(result));
+      }
+    } on PlatformException catch (error) {
+      if (mounted) {
+        setState(() => _operationMessage = error.message ?? error.code);
+      }
+    }
+  }
+
+  void _openSettings() {
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      builder: (context) => _RenderSettingsSheet(
+        settings: _renderSettings,
+        onChanged: _updateRenderSettings,
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final hasTracks = _playlist.entries.isNotEmpty;
@@ -266,6 +403,13 @@ class _MyHomePageState extends State<MyHomePage> {
       appBar: AppBar(
         backgroundColor: Theme.of(context).colorScheme.inversePrimary,
         title: Text(widget.title),
+        actions: [
+          IconButton(
+            tooltip: '再生設定',
+            onPressed: _openSettings,
+            icon: const Icon(Icons.settings),
+          ),
+        ],
       ),
       body: SafeArea(
         child: Column(
@@ -503,6 +647,238 @@ class _MyHomePageState extends State<MyHomePage> {
           ],
         ),
       ),
+    );
+  }
+}
+class _RenderSettingsSheet extends StatefulWidget {
+  const _RenderSettingsSheet({required this.settings, required this.onChanged});
+
+  final RenderSettings settings;
+  final ValueChanged<RenderSettings> onChanged;
+
+  @override
+  State<_RenderSettingsSheet> createState() => _RenderSettingsSheetState();
+}
+
+class _RenderSettingsSheetState extends State<_RenderSettingsSheet> {
+  late RenderSettings _settings = widget.settings;
+
+  void _apply(RenderSettings next) {
+    setState(() => _settings = next);
+    widget.onChanged(next);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return SafeArea(
+      child: Padding(
+        padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
+        child: SizedBox(
+          height: MediaQuery.of(context).size.height * 0.85,
+          child: Column(
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 12, 8, 4),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text('再生設定', style: theme.textTheme.titleLarge),
+                    ),
+                    IconButton(
+                      tooltip: '閉じる',
+                      onPressed: () => Navigator.pop(context),
+                      icon: const Icon(Icons.close),
+                    ),
+                  ],
+                ),
+              ),
+              const Divider(height: 1),
+              Expanded(
+                child: ListView(
+                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
+                  children: [
+                    _sectionTitle('サンプリング'),
+                    _dropdown<int>(
+                      label: '補間方法',
+                      value: _settings.interpolationFilterLength,
+                      items: _interpolationLabels,
+                      onChanged: (v) => _apply(
+                        _settings.copyWith(interpolationFilterLength: v!),
+                      ),
+                    ),
+                    _dropdown<int>(
+                      label: 'サンプリングレート',
+                      value: _settings.sampleRate,
+                      items: {for (final r in _sampleRates) r: '$r Hz'},
+                      onChanged: (v) => _apply(
+                        _settings.copyWith(sampleRate: v!),
+                      ),
+                    ),
+                    _dropdown<bool>(
+                      label: '出力ビット数',
+                      value: _settings.floatOutput,
+                      items: const {true: '32bit Float', false: '16bit PCM'},
+                      onChanged: (v) => _apply(
+                        _settings.copyWith(floatOutput: v!),
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      'サンプリングレートとビット数の変更は、次の再生開始時に反映されます。',
+                      style: theme.textTheme.labelSmall,
+                    ),
+                    _sectionTitle('レンダラー'),
+                    _slider(
+                      label: 'ボリュームランプ',
+                      display: _settings.volumeRampingStrength < 0
+                          ? 'デフォルト'
+                          : '${_settings.volumeRampingStrength}',
+                      value: _settings.volumeRampingStrength.toDouble(),
+                      min: -1,
+                      max: 10,
+                      divisions: 11,
+                      onChanged: (v) => _apply(
+                        _settings.copyWith(volumeRampingStrength: v.round()),
+                      ),
+                    ),
+                    _slider(
+                      label: 'テンポ倍率',
+                      display: _settings.tempoFactor.toStringAsFixed(2),
+                      value: _settings.tempoFactor,
+                      min: 0.25,
+                      max: 4.0,
+                      onChanged: (v) => _apply(
+                        _settings.copyWith(tempoFactor: v),
+                      ),
+                    ),
+_slider(
+                      label: 'ピッチ倍率',
+                      display: _settings.pitchFactor.toStringAsFixed(2),
+                      value: _settings.pitchFactor,
+                      min: 0.25,
+                      max: 4.0,
+                      onChanged: (v) => _apply(
+                        _settings.copyWith(pitchFactor: v),
+                      ),
+                    ),
+                    _slider(
+                      label: 'OPL音源の音量',
+                      display: _settings.oplVolumeFactor.toStringAsFixed(2),
+                      value: _settings.oplVolumeFactor,
+                      min: 0.0,
+                      max: 2.0,
+                      onChanged: (v) => _apply(
+                        _settings.copyWith(oplVolumeFactor: v),
+                      ),
+                    ),
+                    _dropdown<String>(
+                      label: '曲終端時の動作',
+                      value: _settings.playAtEnd,
+                      items: const {
+                        'fadeout': 'フェードアウト',
+                        'continue': 'ループ継続',
+                        'stop': '停止',
+                      },
+                      onChanged: (v) => _apply(
+                        _settings.copyWith(playAtEnd: v!),
+                      ),
+                    ),
+                    SwitchListTile(
+                      contentPadding: EdgeInsets.zero,
+                      title: const Text('Amiga リサンプラをエミュレート'),
+                      value: _settings.emulateAmiga,
+                      onChanged: (v) => _apply(_settings.copyWith(emulateAmiga: v)),
+                    ),
+                    _dropdown<String>(
+                      label: 'Amiga フィルタ種別',
+                      value: _settings.emulateAmigaType,
+                      items: const {
+                        'auto': '自動',
+                        'a500': 'A500',
+                        'a1200': 'A1200',
+                        'unfiltered': 'フィルタなし',
+                      },
+                      onChanged: _settings.emulateAmiga
+                          ? (v) => _apply(
+                              _settings.copyWith(emulateAmigaType: v!),
+                            )
+                          : null,
+                    ),
+                    _dropdown<int>(
+                      label: 'ディザ (16bit出力時のみ)',
+                      value: _settings.dither,
+                      items: const {
+                        0: 'なし',
+                        1: 'デフォルト',
+                        2: 'Rectangular',
+                        3: 'ノイズシェーピング',
+                      },
+                      onChanged: _settings.floatOutput
+                          ? null
+                          : (v) => _apply(_settings.copyWith(dither: v!)),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _sectionTitle(String title) => Padding(
+        padding: const EdgeInsets.only(top: 16, bottom: 4),
+        child: Text(title, style: Theme.of(context).textTheme.titleSmall),
+      );
+
+  Widget _dropdown<T>({
+    required String label,
+    required T value,
+    required Map<T, String> items,
+    required ValueChanged<T?>? onChanged,
+  }) {
+    return ListTile(
+      contentPadding: EdgeInsets.zero,
+      title: Text(label),
+      trailing: DropdownButton<T>(
+        value: value,
+        items: items.entries
+            .map((e) => DropdownMenuItem<T>(value: e.key, child: Text(e.value)))
+            .toList(),
+        onChanged: onChanged,
+      ),
+    );
+  }
+
+  Widget _slider({
+    required String label,
+    required String display,
+    required double value,
+    required double min,
+    required double max,
+    int? divisions,
+    required ValueChanged<double> onChanged,
+  }) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Text(label),
+            Text(display, style: Theme.of(context).textTheme.bodySmall),
+          ],
+        ),
+        Slider(
+          value: value.clamp(min, max).toDouble(),
+          min: min,
+          max: max,
+          divisions: divisions,
+          onChanged: onChanged,
+        ),
+      ],
     );
   }
 }

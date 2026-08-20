@@ -27,6 +27,13 @@ static int openmpt_error_callback(int error, void *user) {
     return OPENMPT_ERROR_FUNC_RESULT_STORE;
 }
 
+static const char *jstring_to_utf8(JNIEnv *env, jstring str) {
+    if (str == NULL) {
+        return NULL;
+    }
+    return (*env)->GetStringUTFChars(env, str, NULL);
+}
+
 JNIEXPORT jboolean JNICALL
 Java_net_klovnin_fluttermodp_NativeOpenMpt_nativeInitializeModule(
         JNIEnv *env,
@@ -157,12 +164,133 @@ Java_net_klovnin_fluttermodp_NativeOpenMpt_nativeSetRepeatCount(
     pthread_mutex_unlock(&g_module_mutex);
 }
 
+JNIEXPORT jboolean JNICALL
+Java_net_klovnin_fluttermodp_NativeOpenMpt_nativeSetRenderParam(
+        JNIEnv *env,
+        jobject object,
+        jint param,
+        jint value) {
+    (void)env;
+    (void)object;
+
+    pthread_mutex_lock(&g_module_mutex);
+    int ok = 0;
+    if (g_module != NULL) {
+        ok = openmpt_module_set_render_param(g_module, param, value);
+    }
+    pthread_mutex_unlock(&g_module_mutex);
+    return ok ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_net_klovnin_fluttermodp_NativeOpenMpt_nativeSetCtlBoolean(
+        JNIEnv *env,
+        jobject object,
+        jstring ctl,
+        jboolean value) {
+    (void)object;
+
+    const char *ctl_utf8 = jstring_to_utf8(env, ctl);
+    if (ctl_utf8 == NULL) {
+        return JNI_FALSE;
+    }
+
+    pthread_mutex_lock(&g_module_mutex);
+    int ok = 0;
+    if (g_module != NULL) {
+        ok = openmpt_module_ctl_set_boolean(g_module, ctl_utf8, value ? 1 : 0);
+    }
+    pthread_mutex_unlock(&g_module_mutex);
+
+    (*env)->ReleaseStringUTFChars(env, ctl, ctl_utf8);
+    return ok ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_net_klovnin_fluttermodp_NativeOpenMpt_nativeSetCtlInteger(
+        JNIEnv *env,
+        jobject object,
+        jstring ctl,
+        jlong value) {
+    (void)object;
+
+    const char *ctl_utf8 = jstring_to_utf8(env, ctl);
+    if (ctl_utf8 == NULL) {
+        return JNI_FALSE;
+    }
+
+    pthread_mutex_lock(&g_module_mutex);
+    int ok = 0;
+    if (g_module != NULL) {
+        ok = openmpt_module_ctl_set_integer(g_module, ctl_utf8, (int64_t)value);
+    }
+    pthread_mutex_unlock(&g_module_mutex);
+
+    (*env)->ReleaseStringUTFChars(env, ctl, ctl_utf8);
+    return ok ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_net_klovnin_fluttermodp_NativeOpenMpt_nativeSetCtlFloatingPoint(
+        JNIEnv *env,
+        jobject object,
+        jstring ctl,
+        jdouble value) {
+    (void)object;
+
+    const char *ctl_utf8 = jstring_to_utf8(env, ctl);
+    if (ctl_utf8 == NULL) {
+        return JNI_FALSE;
+    }
+
+    pthread_mutex_lock(&g_module_mutex);
+    int ok = 0;
+    if (g_module != NULL) {
+        ok = openmpt_module_ctl_set_floatingpoint(g_module, ctl_utf8, (double)value);
+    }
+    pthread_mutex_unlock(&g_module_mutex);
+
+    (*env)->ReleaseStringUTFChars(env, ctl, ctl_utf8);
+    return ok ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_net_klovnin_fluttermodp_NativeOpenMpt_nativeSetCtlText(
+        JNIEnv *env,
+        jobject object,
+        jstring ctl,
+        jstring value) {
+    (void)object;
+
+    const char *ctl_utf8 = jstring_to_utf8(env, ctl);
+    if (ctl_utf8 == NULL) {
+        return JNI_FALSE;
+    }
+    const char *value_utf8 = jstring_to_utf8(env, value);
+    if (value_utf8 == NULL) {
+        (*env)->ReleaseStringUTFChars(env, ctl, ctl_utf8);
+        return JNI_FALSE;
+    }
+
+    pthread_mutex_lock(&g_module_mutex);
+    int ok = 0;
+    if (g_module != NULL) {
+        ok = openmpt_module_ctl_set_text(g_module, ctl_utf8, value_utf8);
+    }
+    pthread_mutex_unlock(&g_module_mutex);
+
+    (*env)->ReleaseStringUTFChars(env, value, value_utf8);
+    (*env)->ReleaseStringUTFChars(env, ctl, ctl_utf8);
+    return ok ? JNI_TRUE : JNI_FALSE;
+}
+
 JNIEXPORT jbyteArray JNICALL
 Java_net_klovnin_fluttermodp_NativeOpenMpt_nativeRenderPcm(
         JNIEnv *env,
         jobject activity,
         jint frame_count,
-        jint sample_rate) {
+        jint sample_rate,
+        jboolean float_output) {
     (void)activity;
 
     pthread_mutex_lock(&g_module_mutex);
@@ -173,21 +301,30 @@ Java_net_klovnin_fluttermodp_NativeOpenMpt_nativeRenderPcm(
     }
 
     const size_t sample_capacity = (size_t)frame_count * CHANNEL_COUNT;
-    int16_t *samples = malloc(sample_capacity * sizeof(int16_t));
-    if (samples == NULL) {
+    const size_t bytes_per_sample = float_output ? sizeof(float) : sizeof(int16_t);
+    void *buffer = malloc(sample_capacity * bytes_per_sample);
+    if (buffer == NULL) {
         __android_log_print(ANDROID_LOG_ERROR, LOG_TAG,
                             "PCM allocation failed for %d frames.", frame_count);
         pthread_mutex_unlock(&g_module_mutex);
         return (*env)->NewByteArray(env, 0);
     }
 
-    const size_t rendered_frames = openmpt_module_read_interleaved_stereo(
-            g_module,
-            sample_rate,
-            (size_t)frame_count,
-            samples);
-    const size_t rendered_bytes =
-            rendered_frames * CHANNEL_COUNT * sizeof(int16_t);
+    size_t rendered_frames = 0;
+    if (float_output) {
+        rendered_frames = openmpt_module_read_interleaved_float_stereo(
+                g_module,
+                sample_rate,
+                (size_t)frame_count,
+                (float *)buffer);
+    } else {
+        rendered_frames = openmpt_module_read_interleaved_stereo(
+                g_module,
+                sample_rate,
+                (size_t)frame_count,
+                (int16_t *)buffer);
+    }
+    const size_t rendered_bytes = rendered_frames * CHANNEL_COUNT * bytes_per_sample;
 
     jbyteArray result = (*env)->NewByteArray(env, (jsize)rendered_bytes);
     if (result != NULL && rendered_bytes > 0) {
@@ -196,9 +333,9 @@ Java_net_klovnin_fluttermodp_NativeOpenMpt_nativeRenderPcm(
                 result,
                 0,
                 (jsize)rendered_bytes,
-                (const jbyte *)samples);
+                (const jbyte *)buffer);
     }
-    free(samples);
+    free(buffer);
 
     if (rendered_frames == 0) {
         __android_log_print(ANDROID_LOG_INFO, LOG_TAG, "Playback reached the end.");

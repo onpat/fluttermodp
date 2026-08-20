@@ -19,11 +19,13 @@ class MainActivity : FlutterActivity() {
     }
 
     private lateinit var playlistStore: PlaylistStore
+    private lateinit var renderSettingsStore: RenderSettingsStore
     private var pendingDocumentResult: MethodChannel.Result? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         playlistStore = PlaylistStore(this)
+        renderSettingsStore = RenderSettingsStore(this)
         if (
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
@@ -48,6 +50,16 @@ class MainActivity : FlutterActivity() {
                         )
                     }
                     "getPlaylist" -> result.success(PlaybackService.state(this))
+                    "getRenderSettings" -> result.success(renderSettingsStore.snapshot().toMap())
+                    "setRenderSettings" -> {
+                        val raw = call.arguments as? Map<*, *>
+                        val updates = raw?.entries
+                            ?.associate { it.key.toString() to it.value }
+                            ?: emptyMap()
+                        val settings = renderSettingsStore.updateFromMap(updates)
+                        notifyRenderSettingsChanged()
+                        result.success(settings.toMap())
+                    }
                     "pickFiles", "pickFile" -> pickModules(result)
                     "loadPlaylist" -> openPlaylist(result)
                     "savePlaylist" -> savePlaylist(result)
@@ -304,6 +316,12 @@ class MainActivity : FlutterActivity() {
     private fun notifyRepeatChanged() {
         if (PlaybackService.isRunning) {
             startService(PlaybackService.intent(this, PlaybackService.ACTION_REPEAT_CHANGED))
+        }
+    }
+
+    private fun notifyRenderSettingsChanged() {
+        if (PlaybackService.isRunning) {
+            startService(PlaybackService.intent(this, PlaybackService.ACTION_RENDER_SETTINGS_CHANGED))
         }
     }
 
