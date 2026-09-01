@@ -8,6 +8,9 @@ import 'package:flutter/services.dart';
 // FlutterEngine.executeDartEntrypoint("httpServerEntrypoint").
 import 'remote/http_server.dart' as remote;
 
+import 'pages/mod_archive_search_page.dart';
+import 'pages/amp_search_page.dart';
+
 const _openMptChannel = MethodChannel('net.klovnin.fluttermodp/libopenmpt');
 
 const _interpolationLabels = <int, String>{
@@ -577,6 +580,36 @@ class _MyHomePageState extends State<MyHomePage> {
                     onPressed: hasTracks && !_busy ? _confirmClear : null,
                     icon: const Icon(Icons.clear_all),
                     label: const Text('クリア'),
+                  ),
+                  TextButton.icon(
+                    onPressed: _busy
+                        ? null
+                        : () async {
+                            await Navigator.push(
+                              context,
+                              MaterialPageRoute(
+                                  builder: (_) =>
+                                      const ModArchiveSearchPage()),
+                            );
+                            await _refreshState();
+                          },
+                    icon: const Icon(Icons.cloud_download),
+                    label: const Text('Mod Archive'),
+                  ),
+                  TextButton.icon(
+                    onPressed: _busy
+                        ? null
+                        : () async {
+                            await Navigator.push(
+                              context,
+                              MaterialPageRoute(
+                                  builder: (_) =>
+                                      const AmpSearchPage()),
+                            );
+                            await _refreshState();
+                          },
+                    icon: const Icon(Icons.cloud_download),
+                    label: const Text('AMP'),
                   ),
                 ],
               ),

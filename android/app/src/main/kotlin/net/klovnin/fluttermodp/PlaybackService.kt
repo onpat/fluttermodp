@@ -275,9 +275,8 @@ class PlaybackService : Service() {
                 activeUri = entry.uri
                 moduleName = entry.name
 
-                val moduleData = contentResolver.openInputStream(android.net.Uri.parse(entry.uri))?.use {
-                    it.readBytes()
-                } ?: throw IllegalStateException("${entry.name} を読み込めませんでした。")
+                val moduleData = openModuleData(entry.uri)
+                    ?: throw IllegalStateException("${entry.name} を読み込めませんでした。")
                 if (!NativeOpenMpt.nativeInitializeModule(moduleData)) {
                     throw IllegalStateException(NativeOpenMpt.nativeGetLastMessage())
                 }
@@ -931,6 +930,31 @@ class PlaybackService : Service() {
                 result.success(true)
             }
             else -> result.notImplemented()
+        }
+    }
+
+    /**
+     * Opens module data from a URI that may be either a plain file path
+     * (e.g. /storage/emulated/0/…) or a content:// URI.
+     */
+    private fun openModuleData(uriString: String): ByteArray? {
+        val uri = android.net.Uri.parse(uriString)
+        // Try content-resolver first (handles content:// URIs)
+        try {
+            contentResolver.openInputStream(uri)?.use { return it.readBytes() }
+        } catch (_: Exception) {
+            // Fall through to file-based access
+        }
+        // Fallback: treat as a plain file path
+        return try {
+            val file = java.io.File(uriString)
+            if (file.exists() && file.canRead()) {
+                file.readBytes()
+            } else {
+                null
+            }
+        } catch (_: Exception) {
+            null
         }
     }
 }

@@ -147,6 +147,15 @@ class MainActivity : FlutterActivity() {
                         }
                         result.success(true)
                     }
+                    "addTrackToPlaylist" -> {
+                        val uri = call.argument<String>("uri") ?: ""
+                        val name = call.argument<String>("name") ?: uri.substringAfterLast('/')
+                        if (uri.isNotBlank()) {
+                            playlistStore.add(listOf(PlaylistEntry(uri, name)))
+                            notifyPlaylistChanged()
+                        }
+                        result.success(PlaybackService.state(this))
+                    }
                     else -> result.notImplemented()
                 }
             }
