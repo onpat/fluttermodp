@@ -696,6 +696,18 @@ class _RenderSettingsSheet extends StatefulWidget {
 class _RenderSettingsSheetState extends State<_RenderSettingsSheet> {
   late RenderSettings _settings = widget.settings;
 
+  /// 値が 1.00 の近傍にあるとき、正確に 1.00 へ吸着させる許容幅。
+  static const double _snapTolerance = 0.04;
+
+  /// テンポ倍率とピッチ倍率を連動して変更するかどうか。
+  bool _linkTempoPitch = false;
+
+  /// [value] が 1.00 に十分近い場合は 1.00 に吸着させ、それ以外はそのまま返す。
+  double _snapToUnit(double value) {
+    const unit = 1.0;
+    return (value - unit).abs() <= _snapTolerance ? unit : value;
+  }
+
   void _apply(RenderSettings next) {
     setState(() => _settings = next);
     widget.onChanged(next);
@@ -775,25 +787,47 @@ class _RenderSettingsSheetState extends State<_RenderSettingsSheet> {
                         _settings.copyWith(volumeRampingStrength: v.round()),
                       ),
                     ),
+                    SwitchListTile(
+                      contentPadding: EdgeInsets.zero,
+                      title: const Text('テンポとピッチを連動'),
+                      value: _linkTempoPitch,
+                      onChanged: (v) => setState(() => _linkTempoPitch = v),
+                    ),
                     _slider(
                       label: 'テンポ倍率',
                       display: _settings.tempoFactor.toStringAsFixed(2),
                       value: _settings.tempoFactor,
                       min: 0.25,
                       max: 4.0,
-                      onChanged: (v) => _apply(
-                        _settings.copyWith(tempoFactor: v),
-                      ),
+                      onChanged: (v) {
+                        final snapped = _snapToUnit(v);
+                        _apply(
+                          _linkTempoPitch
+                              ? _settings.copyWith(
+                                  tempoFactor: snapped,
+                                  pitchFactor: snapped,
+                                )
+                              : _settings.copyWith(tempoFactor: snapped),
+                        );
+                      },
                     ),
-_slider(
+                    _slider(
                       label: 'ピッチ倍率',
                       display: _settings.pitchFactor.toStringAsFixed(2),
                       value: _settings.pitchFactor,
                       min: 0.25,
                       max: 4.0,
-                      onChanged: (v) => _apply(
-                        _settings.copyWith(pitchFactor: v),
-                      ),
+                      onChanged: (v) {
+                        final snapped = _snapToUnit(v);
+                        _apply(
+                          _linkTempoPitch
+                              ? _settings.copyWith(
+                                  tempoFactor: snapped,
+                                  pitchFactor: snapped,
+                                )
+                              : _settings.copyWith(pitchFactor: snapped),
+                        );
+                      },
                     ),
                     _slider(
                       label: 'OPL音源の音量',
@@ -802,7 +836,7 @@ _slider(
                       min: 0.0,
                       max: 2.0,
                       onChanged: (v) => _apply(
-                        _settings.copyWith(oplVolumeFactor: v),
+                        _settings.copyWith(oplVolumeFactor: _snapToUnit(v)),
                       ),
                     ),
                     _dropdown<String>(
