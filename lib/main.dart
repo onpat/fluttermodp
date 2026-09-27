@@ -700,7 +700,7 @@ class _RenderSettingsSheetState extends State<_RenderSettingsSheet> {
   static const double _snapTolerance = 0.04;
 
   /// テンポ倍率とピッチ倍率を連動して変更するかどうか。
-  bool _linkTempoPitch = false;
+  bool _linkTempoPitch = true;
 
   /// [value] が 1.00 に十分近い場合は 1.00 に吸着させ、それ以外はそのまま返す。
   double _snapToUnit(double value) {
