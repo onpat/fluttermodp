@@ -63,6 +63,19 @@ android {
             signingConfig = signingConfigs.getByName("release")
         }
     }
+
+    flavorDimensions.add("default")
+
+    productFlavors {
+        create("Dev") {
+            dimension = "default"
+            // set package name suffix
+            applicationIdSuffix = ".dev" 
+        }
+        create("Prod") {
+            dimension = "default"
+        }
+    }
 }
 
 kotlin {
