@@ -2,6 +2,17 @@
 
 Flutter module player, Developed with Cline.
 
+## Screenshots
+<details>
+  <summary>main</summary>
+<img src="docs/main_screen.png" width="400">
+  </details>
+  
+<details>
+  <summary>setting</summary>
+<img src="docs/setting_screen.png" width="400">
+</details>
+
 ## Features
 
 - Play tracker file with libopenmpt
