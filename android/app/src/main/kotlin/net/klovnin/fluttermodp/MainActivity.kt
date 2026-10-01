@@ -6,6 +6,8 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
+import android.provider.Settings
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -156,12 +158,66 @@ class MainActivity : FlutterActivity() {
                         }
                         result.success(PlaybackService.state(this))
                     }
+                    "getPublicDocumentsDir" -> result.success(publicDocumentsDir())
+                    "hasAllFilesAccess" -> result.success(hasAllFilesAccess())
+                    "requestAllFilesAccess" -> requestAllFilesAccess(result)
                     else -> result.notImplemented()
                 }
             }
     }
 
+    // -------------------------------------------------------------------------
+    // Shared storage access (download destination: Documents/mods etc.)
+    // -------------------------------------------------------------------------
+
+    /// 共有ストレージの Documents ディレクトリ（例: /storage/emulated/0/Documents）。
+    @Suppress("DEPRECATION")
+    private fun publicDocumentsDir(): String =
+        Environment
+            .getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS)
+            .absolutePath
+
+    /// 共有ストレージへの書き込み権限があるかどうか。
+    /// Android 11+ では「すべてのファイルへのアクセス」(MANAGE_EXTERNAL_STORAGE)、
+    /// Android 10 以下では WRITE_EXTERNAL_STORAGE の許可状態を返す。
+    private fun hasAllFilesAccess(): Boolean =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            Environment.isExternalStorageManager()
+        } else {
+            checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) ==
+                PackageManager.PERMISSION_GRANTED
+        }
+
+    /// 共有ストレージへの書き込み権限を要求する。
+    /// Android 11+ ではシステム設定の「すべてのファイルへのアクセス」画面を開く。
+    /// 結果は非同期なので、戻ってきたら hasAllFilesAccess で再確認する。
+    private fun requestAllFilesAccess(result: MethodChannel.Result) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            try {
+                startActivity(
+                    Intent(
+                        Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                        Uri.parse("package:$packageName"),
+                    )
+                )
+            } catch (_: Exception) {
+                try {
+                    // 一部の端末では package URI 形式に対応していない。
+                    startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
+                } catch (error: Exception) {
+                    result.error("all_files_access", "設定画面を開けませんでした: ${error.message}", null)
+                    return
+                }
+            }
+            result.success(true)
+        } else {
+            requestPermissions(arrayOf(Manifest.permission.WRITE_EXTERNAL_STORAGE), 1002)
+            result.success(true)
+        }
+    }
+
     private fun pickModules(result: MethodChannel.Result) {
+
         if (!beginDocumentOperation(result)) return
         startActivityForResult(
             Intent(Intent.ACTION_OPEN_DOCUMENT).apply {

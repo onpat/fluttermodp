@@ -1,11 +1,9 @@
-import 'dart:io';
-
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:path_provider/path_provider.dart';
 
 import '../models/mod_archive_entry.dart';
 import '../services/mod_archive_service.dart';
+import '../services/download_dir_store.dart';
 
 /// Full-screen page that searches Mod Archive and downloads modules
 /// directly into the local playlist.
@@ -25,31 +23,6 @@ class _ModArchiveSearchPageState extends State<ModArchiveSearchPage> {
   List<ModArchiveEntry> _results = const [];
 
   final Set<int> _downloadingIds = {};
-  Directory? _saveDir;
-
-  @override
-  void initState() {
-    super.initState();
-    _initSaveDir();
-  }
-
-  Future<void> _initSaveDir() async {
-    try {
-      final dir = await getExternalStorageDirectory();
-      if (dir == null) {
-        // Fallback to app documents directory
-        final fallback = await getApplicationDocumentsDirectory();
-        _saveDir = Directory('${fallback.path}/modarchive');
-        return;
-      }
-      _saveDir = Directory('${dir.path}/modarchive');
-    } catch (_) {
-      try {
-        final fallback = await getApplicationDocumentsDirectory();
-        _saveDir = Directory('${fallback.path}/modarchive');
-      } catch (_) {}
-    }
-  }
 
   @override
   void dispose() {
@@ -94,25 +67,34 @@ class _ModArchiveSearchPageState extends State<ModArchiveSearchPage> {
     setState(() => _downloadingIds.add(entry.moduleId));
 
     try {
-      Directory saveDir = _saveDir ?? Directory(
-        '${(await getExternalStorageDirectory() ?? await getApplicationDocumentsDirectory()).path}/modarchive',
-      );
-      _saveDir = saveDir;
+      // 設定画面で選択されたダウンロード先（初期値: Documents/mods）に保存する。
+      final saveDir = await DownloadDirStore.instance.ensureDir();
 
-      final filePath = await ModArchiveService.download(
+      final result = await ModArchiveService.download(
         moduleId: entry.moduleId,
         filename: entry.filename,
         saveDir: saveDir,
       );
 
       if (!mounted) return;
-      await _addTrackToPlaylist(filePath, entry.filename);
+      await _addTrackToPlaylist(result.path, entry.filename);
 
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('プレイリストに追加: ${entry.filename}'),
+          content: Text(result.alreadyExists
+              ? 'すでにダウンロードされています: ${entry.filename}'
+              : 'プレイリストに追加: ${entry.filename}'),
           duration: const Duration(seconds: 2),
+        ),
+      );
+    } on DownloadDirException catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(error.message),
+          backgroundColor: Colors.red,
+          duration: const Duration(seconds: 5),
         ),
       );
     } catch (error) {

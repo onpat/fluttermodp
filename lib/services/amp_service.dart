@@ -4,6 +4,12 @@ import 'dart:io';
 
 import '../models/amp_entry.dart';
 
+/// Result of a module download from AMP.
+///
+/// [alreadyExists] is `true` when the target file was already on disk and
+/// the download itself was skipped.
+typedef AmpDownloadResult = ({String path, bool alreadyExists});
+
 /// Client that searches AMP (amp.dascene.net) for composers and downloads
 /// modules. Modules arrive as gzip-compressed files and are decompressed
 /// into an author-named sub-directory.
@@ -78,7 +84,10 @@ class AmpService {
 
   /// Download a module; modules arrive as .gz files and are decompressed.
   /// Saved as [saveDir]/[composerHandle]/[moduleName].[format].
-  static Future<String> download({
+  ///
+  /// If the target file already exists (non-empty), no download is performed
+  /// and the returned [AmpDownloadResult] has `alreadyExists: true`.
+  static Future<AmpDownloadResult> download({
     required int index,
     required String composerHandle,
     required String moduleName,
@@ -93,6 +102,11 @@ class AmpService {
     final ext = format.toLowerCase();
     final filename = '$moduleName.$ext';
     final file = File('${authorDir.path}/$filename');
+
+    // Skip the download when the same file has already been saved.
+    if (file.existsSync() && file.lengthSync() > 0) {
+      return (path: file.absolute.path, alreadyExists: true);
+    }
 
     final downloadUri =
         Uri.https(_baseUrl, '/downmod.php', <String, String>{
@@ -129,7 +143,7 @@ class AmpService {
       );
     }
 
-    return file.absolute.path;
+    return (path: file.absolute.path, alreadyExists: false);
   }
 
   // ---------------------------------------------------------------------------

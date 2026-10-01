@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -10,6 +11,8 @@ import 'remote/http_server.dart' as remote;
 
 import 'pages/mod_archive_search_page.dart';
 import 'pages/amp_search_page.dart';
+import 'services/download_dir_store.dart';
+import 'widgets/directory_picker_dialog.dart';
 
 const _openMptChannel = MethodChannel('net.klovnin.fluttermodp/libopenmpt');
 
@@ -65,6 +68,8 @@ class PlaylistState {
     this.httpServerRunning = false,
     this.httpServerPort = 0,
     this.httpServerAddress,
+    this.positionMs = 0,
+    this.durationMs = 0,
   });
 
   final List<PlaylistEntry> entries;
@@ -77,6 +82,8 @@ class PlaylistState {
   final bool httpServerRunning;
   final int httpServerPort;
   final String? httpServerAddress;
+  final int positionMs;
+  final int durationMs;
 
   factory PlaylistState.fromMap(Map<Object?, Object?> map) {
     final rawEntries = map['entries'] as List<Object?>? ?? const [];
@@ -94,6 +101,8 @@ class PlaylistState {
       httpServerRunning: map['httpServerRunning'] == true,
       httpServerPort: (map['httpServerPort'] as num?)?.toInt() ?? 0,
       httpServerAddress: map['httpServerAddress'] as String?,
+      positionMs: (map['positionMs'] as num?)?.toInt() ?? 0,
+      durationMs: (map['durationMs'] as num?)?.toInt() ?? 0,
     );
   }
 }
@@ -254,12 +263,14 @@ class _MyHomePageState extends State<MyHomePage> {
   bool _busy = false;
   bool _refreshing = false;
   String? _operationMessage;
-  late final TextEditingController _httpPortController;
+
+  /// シークバーをドラッグ中の値（秒）。ドラッグ中はポーリング更新に
+  /// 干渉されないように、この値を優先して表示する。
+  double? _seekDragValue;
 
   @override
   void initState() {
     super.initState();
-    _httpPortController = TextEditingController(text: '8080');
     _refreshState();
     _loadRenderSettings();
     _stateTimer = Timer.periodic(
@@ -271,13 +282,7 @@ class _MyHomePageState extends State<MyHomePage> {
   @override
   void dispose() {
     _stateTimer?.cancel();
-    _httpPortController.dispose();
     super.dispose();
-  }
-
-  int get _httpPort {
-    final value = int.tryParse(_httpPortController.text.trim());
-    return (value != null && value > 0 && value < 65536) ? value : 8080;
   }
 
   Future<void> _refreshState({bool quiet = false}) async {
@@ -397,6 +402,69 @@ class _MyHomePageState extends State<MyHomePage> {
     );
   }
 
+  /// ミリ秒を「m:ss」形式の文字列へ変換する。
+  String _formatDuration(int milliseconds) {
+    final totalSeconds =
+        milliseconds <= 0 ? 0 : milliseconds ~/ 1000;
+    final minutes = totalSeconds ~/ 60;
+    final seconds = totalSeconds % 60;
+    return '$minutes:${seconds.toString().padLeft(2, '0')}';
+  }
+
+  /// 「再生中」表示の下に置くシークバー。
+  ///
+  /// 再生中または一時停止中で曲の長さが判明しているときのみ操作可能。
+  /// ドラッグ中は [_seekDragValue] を表示し、指を離した時点でネイティブ側へ
+  /// シーク要求を送る。
+  Widget _buildSeekBar() {
+    final playlist = _playlist;
+    final seekable = (playlist.isPlaying || playlist.isPaused) &&
+        playlist.durationMs > 0;
+    // Slider は max が 0 だと描画できないため、無効時は仮の幅を使う。
+    final durationSeconds = seekable ? playlist.durationMs / 1000.0 : 1.0;
+    final positionSeconds = playlist.positionMs / 1000.0;
+    final value = (_seekDragValue ?? positionSeconds).clamp(0.0, durationSeconds);
+
+    return Row(
+      children: [
+        SizedBox(
+          width: 44,
+          child: Text(
+            _formatDuration((value * 1000).round()),
+            textAlign: TextAlign.end,
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
+        ),
+        Expanded(
+          child: Slider(
+            key: const ValueKey('seekBar'),
+            value: value,
+            max: durationSeconds,
+            onChanged: seekable
+                ? (newValue) => setState(() => _seekDragValue = newValue)
+                : null,
+            onChangeEnd: seekable
+                ? (newValue) {
+                    setState(() => _seekDragValue = null);
+                    _invoke(
+                      'seek',
+                      arguments: {'positionMs': (newValue * 1000).round()},
+                    );
+                  }
+                : null,
+          ),
+        ),
+        SizedBox(
+          width: 44,
+          child: Text(
+            _formatDuration(seekable ? playlist.durationMs : 0),
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
+        ),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final hasTracks = _playlist.entries.isNotEmpty;
@@ -429,6 +497,8 @@ class _MyHomePageState extends State<MyHomePage> {
                     textAlign: TextAlign.center,
                     style: Theme.of(context).textTheme.titleSmall,
                   ),
+                  const SizedBox(height: 4),
+                  _buildSeekBar(),
                   if (_operationMessage != null) ...[
                     const SizedBox(height: 4),
                     Text(
@@ -470,84 +540,6 @@ class _MyHomePageState extends State<MyHomePage> {
                   icon: const Icon(Icons.skip_next),
                 ),
               ],
-            ),
-            Row(
-              children: [
-                Expanded(
-                  child: SwitchListTile(
-                    dense: true,
-                    title: const Text('1曲リピート'),
-                    value: _playlist.repeatOne,
-                    onChanged: (enabled) => _invoke(
-                      'setRepeatOne',
-                      arguments: {'enabled': enabled},
-                    ),
-                  ),
-                ),
-                Expanded(
-                  child: SwitchListTile(
-                    dense: true,
-                    title: const Text('全曲リピート'),
-                    value: _playlist.repeatPlaylist,
-                    onChanged: (enabled) => _invoke(
-                      'setRepeatPlaylist',
-                      arguments: {'enabled': enabled},
-                    ),
-                  ),
-                ),
-              ],
-            ),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
-              child: Card(
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      SwitchListTile(
-                        dense: true,
-                        contentPadding: EdgeInsets.zero,
-                        title: const Text('HTTPリモコン'),
-                        subtitle: Text(
-                          _playlist.httpServerRunning
-                              ? '${_playlist.httpServerAddress ?? '0.0.0.0'}:${_playlist.httpServerPort}'
-                              : '再生・プレイリストを遠隔操作できます',
-                        ),
-                        value: _playlist.httpServerRunning,
-                        onChanged: (enabled) async {
-                          if (enabled) {
-                            await _invoke(
-                              'startHttpServer',
-                              arguments: {'port': _httpPort},
-                            );
-                          } else {
-                            await _invoke('stopHttpServer');
-                          }
-                        },
-                      ),
-                      Row(
-                        children: [
-                          Expanded(
-                            child: TextField(
-                              controller: _httpPortController,
-                              keyboardType: TextInputType.number,
-                              enabled: !_playlist.httpServerRunning,
-                              decoration: const InputDecoration(
-                                labelText: 'ポート',
-                                hintText: '8080',
-                                border: OutlineInputBorder(),
-                                isDense: true,
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 8),
-                    ],
-                  ),
-                ),
-              ),
             ),
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 12),
@@ -702,6 +694,153 @@ class _RenderSettingsSheetState extends State<_RenderSettingsSheet> {
   /// テンポ倍率とピッチ倍率を連動して変更するかどうか。
   bool _linkTempoPitch = true;
 
+  /// AMP / Mod Archive 共通のダウンロード先ディレクトリ。
+  Directory? _downloadDir;
+  bool _downloadDirLoading = true;
+
+  /// リピート再生と HTTPリモコンの現在状態。
+  PlaylistState _playlist = const PlaylistState();
+  Timer? _stateTimer;
+  bool _refreshing = false;
+  String? _operationMessage;
+  late final TextEditingController _httpPortController;
+
+  @override
+  void initState() {
+    super.initState();
+    _httpPortController = TextEditingController(text: '8080');
+    _loadDownloadDir();
+    _refreshState();
+    _stateTimer = Timer.periodic(
+      const Duration(milliseconds: 750),
+      (_) => _refreshState(),
+    );
+  }
+
+  @override
+  void dispose() {
+    _stateTimer?.cancel();
+    _httpPortController.dispose();
+    super.dispose();
+  }
+
+  int get _httpPort {
+    final value = int.tryParse(_httpPortController.text.trim());
+    return (value != null && value > 0 && value < 65536) ? value : 8080;
+  }
+
+  /// メイン画面と同様に、再生状態を取得して表示を最新化する。
+  Future<void> _refreshState() async {
+    if (_refreshing) return;
+    _refreshing = true;
+    try {
+      final result = await _openMptChannel.invokeMapMethod<Object?, Object?>(
+        'getPlaylist',
+      );
+      if (mounted && result != null) {
+        setState(() => _playlist = PlaylistState.fromMap(result));
+      }
+    } on MissingPluginException {
+      // 非 Android 環境では既定値のまま表示する。
+    } on PlatformException {
+      // 取得に失敗したときは現在の表示を維持する。
+    } finally {
+      _refreshing = false;
+    }
+  }
+
+  /// リピート再生と HTTPリモコンの操作をネイティブ側へ渡し、状態を更新する。
+  Future<void> _invokePlayer(
+    String method, {
+    Map<String, Object?>? arguments,
+  }) async {
+    if (mounted) setState(() => _operationMessage = null);
+    try {
+      await _openMptChannel.invokeMethod<Object?>(method, arguments);
+    } on MissingPluginException {
+      if (mounted) {
+        setState(() => _operationMessage = 'Android端末で実行してください。');
+      }
+      return;
+    } on PlatformException catch (error) {
+      if (mounted) {
+        setState(() => _operationMessage = error.message ?? error.code);
+      }
+      return;
+    }
+    await _refreshState();
+  }
+
+  Future<void> _loadDownloadDir() async {
+    try {
+      final dir = await DownloadDirStore.instance.load();
+      if (!mounted) return;
+      setState(() {
+        _downloadDir = dir;
+        _downloadDirLoading = false;
+      });
+    } catch (_) {
+      if (mounted) setState(() => _downloadDirLoading = false);
+    }
+  }
+
+  Future<void> _pickDownloadDir() async {
+    final store = DownloadDirStore.instance;
+    final hasAccess = await store.hasAccess();
+    if (!hasAccess) {
+      if (!mounted) return;
+      final openSettings = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('ストレージへのアクセス許可'),
+          content: const Text(
+            '共有ストレージ（Documents など）へ保存するには、'
+            '「すべてのファイルへのアクセス」を許可する必要があります。\n'
+            'システム設定画面を開きますか？',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('キャンセル'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('設定を開く'),
+            ),
+          ],
+        ),
+      );
+      if (openSettings == true) {
+        await store.requestAccess();
+      }
+      return;
+    }
+    if (!mounted) return;
+    final initial = _downloadDir;
+    if (initial == null) return;
+    final root = await store.pickerRoot();
+    if (!mounted) return;
+    final picked = await showDialog<String>(
+      context: context,
+      builder: (context) => DirectoryPickerDialog(
+        initialDir: initial,
+        rootDir: root,
+      ),
+    );
+    if (picked == null || picked.isEmpty) return;
+    await store.set(Directory(picked));
+    if (!mounted) return;
+    setState(() => _downloadDir = Directory(picked));
+  }
+
+  Future<void> _resetDownloadDir() async {
+    try {
+      final dir = await DownloadDirStore.instance.resetToDefault();
+      if (!mounted) return;
+      setState(() => _downloadDir = dir);
+    } catch (_) {}
+  }
+
   /// [value] が 1.00 に十分近い場合は 1.00 に吸着させ、それ以外はそのまま返す。
   double _snapToUnit(double value) {
     const unit = 1.0;
@@ -739,10 +878,94 @@ class _RenderSettingsSheetState extends State<_RenderSettingsSheet> {
                 ),
               ),
               const Divider(height: 1),
+              if (_operationMessage != null)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+                  child: Text(
+                    _operationMessage!,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.bodySmall,
+                  ),
+                ),
               Expanded(
                 child: ListView(
                   padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
                   children: [
+                    _sectionTitle('リピート再生'),
+                    SwitchListTile(
+                      contentPadding: EdgeInsets.zero,
+                      title: const Text('1曲リピート'),
+                      value: _playlist.repeatOne,
+                      onChanged: (enabled) => _invokePlayer(
+                        'setRepeatOne',
+                        arguments: {'enabled': enabled},
+                      ),
+                    ),
+                    SwitchListTile(
+                      contentPadding: EdgeInsets.zero,
+                      title: const Text('全曲リピート'),
+                      value: _playlist.repeatPlaylist,
+                      onChanged: (enabled) => _invokePlayer(
+                        'setRepeatPlaylist',
+                        arguments: {'enabled': enabled},
+                      ),
+                    ),
+                    _sectionTitle('リモコン'),
+                    SwitchListTile(
+                      contentPadding: EdgeInsets.zero,
+                      title: const Text('HTTPリモコン'),
+                      subtitle: Text(
+                        _playlist.httpServerRunning
+                            ? '${_playlist.httpServerAddress ?? '0.0.0.0'}:${_playlist.httpServerPort}'
+                            : '再生・プレイリストを遠隔操作できます',
+                      ),
+                      value: _playlist.httpServerRunning,
+                      onChanged: (enabled) => _invokePlayer(
+                        enabled ? 'startHttpServer' : 'stopHttpServer',
+                        arguments: enabled ? {'port': _httpPort} : null,
+                      ),
+                    ),
+                    TextField(
+                      controller: _httpPortController,
+                      keyboardType: TextInputType.number,
+                      enabled: !_playlist.httpServerRunning,
+                      decoration: const InputDecoration(
+                        labelText: 'ポート',
+                        hintText: '8080',
+                        border: OutlineInputBorder(),
+                        isDense: true,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    _sectionTitle('ダウンロード'),
+                    ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      title: const Text('保存先フォルダ'),
+                      subtitle: Text(
+                        _downloadDirLoading
+                            ? '読み込み中…'
+                            : _downloadDir?.path ?? '-',
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      trailing: IconButton(
+                        tooltip: 'フォルダを選択',
+                        icon: const Icon(Icons.folder_open),
+                        onPressed: _pickDownloadDir,
+                      ),
+                    ),
+                    Text(
+                      'AMP / Mod Archive からダウンロードしたモジュールの保存先です。'
+                      '初期値は Documents/mods です。',
+                      style: theme.textTheme.labelSmall,
+                    ),
+                    TextButton.icon(
+                      onPressed:
+                          _downloadDirLoading ? null : _resetDownloadDir,
+                      icon: const Icon(Icons.restore),
+                      label: const Text('初期値 (Documents/mods) に戻す'),
+                    ),
                     _sectionTitle('サンプリング'),
                     _dropdown<int>(
                       label: '補間方法',
@@ -798,7 +1021,7 @@ class _RenderSettingsSheetState extends State<_RenderSettingsSheet> {
                       display: _settings.tempoFactor.toStringAsFixed(2),
                       value: _settings.tempoFactor,
                       min: 0.25,
-                      max: 4.0,
+                      max: 2.0,
                       onChanged: (v) {
                         final snapped = _snapToUnit(v);
                         _apply(
@@ -816,7 +1039,7 @@ class _RenderSettingsSheetState extends State<_RenderSettingsSheet> {
                       display: _settings.pitchFactor.toStringAsFixed(2),
                       value: _settings.pitchFactor,
                       min: 0.25,
-                      max: 4.0,
+                      max: 2.0,
                       onChanged: (v) {
                         final snapped = _snapToUnit(v);
                         _apply(

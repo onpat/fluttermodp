@@ -78,6 +78,14 @@ class PlaybackService : Service() {
         @Volatile var activeIndex: Int = -1
             private set
 
+        // Latest playback position and module duration reported to the Flutter
+        // side. Updated by the playback thread (roughly once per second while
+        // playing) and on every playback-state transition.
+        @Volatile var positionMs: Long = 0L
+            private set
+        @Volatile var durationMs: Long = 0L
+            private set
+
         fun intent(context: Context, action: String): Intent =
             Intent(context, PlaybackService::class.java).setAction(action)
 
@@ -95,6 +103,8 @@ class PlaybackService : Service() {
                 "httpServerRunning" to isHttpServerRunning,
                 "httpServerPort" to httpServerPort,
                 "httpServerAddress" to httpServerAddress,
+                "positionMs" to positionMs,
+                "durationMs" to durationMs,
             )
         }
 
@@ -203,6 +213,8 @@ class PlaybackService : Service() {
     override fun onDestroy() {
         isRunning = false
         isPaused = false
+        positionMs = 0L
+        durationMs = 0L
         synchronized(stateLock) { stateLock.notifyAll() }
         playbackThread?.takeIf { it !== Thread.currentThread() }?.join(2000)
         disposeHttp()
@@ -532,6 +544,8 @@ class PlaybackService : Service() {
     private fun stopPlayback(removeNotification: Boolean) {
         isRunning = false
         isPaused = false
+        positionMs = 0L
+        durationMs = 0L
         requestedIndex.set(-1)
         synchronized(stateLock) { stateLock.notifyAll() }
         audioTrack?.let {
@@ -633,20 +647,22 @@ class PlaybackService : Service() {
     }
 
     private fun updateMetadata() {
-        val durationMs = (NativeOpenMpt.nativeGetDurationSeconds() * 1000.0).toLong()
+        val moduleDurationMs = (NativeOpenMpt.nativeGetDurationSeconds() * 1000.0).toLong()
+        durationMs = moduleDurationMs
         mediaSession.setMetadata(
             MediaMetadata.Builder()
                 .putString(MediaMetadata.METADATA_KEY_TITLE, moduleName)
                 .putString(MediaMetadata.METADATA_KEY_ARTIST, "libopenmpt")
-                .putLong(MediaMetadata.METADATA_KEY_DURATION, durationMs)
+                .putLong(MediaMetadata.METADATA_KEY_DURATION, moduleDurationMs)
                 .build(),
         )
     }
 
     private fun updatePlaybackState(state: Int) {
-        val positionMs = if (prepared) {
+        val playbackPositionMs = if (prepared) {
             (NativeOpenMpt.nativeGetPositionSeconds() * 1000.0).toLong()
         } else 0L
+        positionMs = playbackPositionMs
         mediaSession.setPlaybackState(
             PlaybackState.Builder()
                 .setActions(
@@ -655,7 +671,7 @@ class PlaybackService : Service() {
                         PlaybackState.ACTION_SKIP_TO_NEXT or PlaybackState.ACTION_SKIP_TO_PREVIOUS or
                         PlaybackState.ACTION_SEEK_TO,
                 )
-                .setState(state, positionMs, if (state == PlaybackState.STATE_PLAYING) 1f else 0f)
+                .setState(state, playbackPositionMs, if (state == PlaybackState.STATE_PLAYING) 1f else 0f)
                 .build(),
         )
     }

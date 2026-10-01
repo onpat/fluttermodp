@@ -1,11 +1,9 @@
-import 'dart:io';
-
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:path_provider/path_provider.dart';
 
 import '../models/amp_entry.dart';
 import '../services/amp_service.dart';
+import '../services/download_dir_store.dart';
 
 /// Full-screen page that searches AMP (amp.dascene.net) for composers,
 /// lists their modules, and downloads them into composer-named folders.
@@ -35,30 +33,6 @@ class _AmpSearchPageState extends State<AmpSearchPage> {
 
   // Download state
   final Set<int> _downloadingIndices = {};
-  Directory? _saveDir;
-
-  @override
-  void initState() {
-    super.initState();
-    _initSaveDir();
-  }
-
-  Future<void> _initSaveDir() async {
-    try {
-      final dir = await getExternalStorageDirectory();
-      if (dir == null) {
-        final fallback = await getApplicationDocumentsDirectory();
-        _saveDir = Directory('${fallback.path}/amp');
-        return;
-      }
-      _saveDir = Directory('${dir.path}/amp');
-    } catch (_) {
-      try {
-        final fallback = await getApplicationDocumentsDirectory();
-        _saveDir = Directory('${fallback.path}/amp');
-      } catch (_) {}
-    }
-  }
 
   @override
   void dispose() {
@@ -129,12 +103,11 @@ class _AmpSearchPageState extends State<AmpSearchPage> {
     setState(() => _downloadingIndices.add(module.index));
 
     try {
-      Directory saveDir = _saveDir ?? Directory(
-        '${(await getExternalStorageDirectory() ?? await getApplicationDocumentsDirectory()).path}/amp',
-      );
-      _saveDir = saveDir;
+      // 設定画面で選択されたダウンロード先（初期値: Documents/mods）に保存する。
+      // 作曲者ごとのサブフォルダは保存先の下に作られる。
+      final saveDir = await DownloadDirStore.instance.ensureDir();
 
-      final filePath = await AmpService.download(
+      final result = await AmpService.download(
         index: module.index,
         composerHandle: module.composerHandle,
         moduleName: module.name,
@@ -144,13 +117,24 @@ class _AmpSearchPageState extends State<AmpSearchPage> {
 
       if (!mounted) return;
       final name = '${module.name}.${module.format.toLowerCase()}';
-      await _addTrackToPlaylist(filePath, name);
+      await _addTrackToPlaylist(result.path, name);
 
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('Added to playlist: ${module.name}'),
+          content: Text(result.alreadyExists
+              ? 'すでにダウンロードされています: ${module.name}'
+              : 'Added to playlist: ${module.name}'),
           duration: const Duration(seconds: 2),
+        ),
+      );
+    } on DownloadDirException catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(error.message),
+          backgroundColor: Theme.of(context).colorScheme.error,
+          duration: const Duration(seconds: 5),
         ),
       );
     } catch (error) {

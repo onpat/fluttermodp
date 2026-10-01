@@ -4,6 +4,12 @@ import 'dart:io';
 
 import '../models/mod_archive_entry.dart';
 
+/// Result of a module download from Mod Archive.
+///
+/// [alreadyExists] is `true` when the target file was already on disk and
+/// the download itself was skipped.
+typedef ModArchiveDownloadResult = ({String path, bool alreadyExists});
+
 /// Lightweight client that searches Mod Archive and downloads modules.
 ///
 /// Only uses [dart:io] – no third-party HTTP or HTML-parser dependencies.
@@ -50,7 +56,10 @@ class ModArchiveService {
 
   /// Download a module and save it as [saveDir]/[filename].
   /// Returns the absolute path of the saved file.
-  static Future<String> download({
+  ///
+  /// If the target file already exists (non-empty), no download is performed
+  /// and the returned [ModArchiveDownloadResult] has `alreadyExists: true`.
+  static Future<ModArchiveDownloadResult> download({
     required int moduleId,
     required String filename,
     required Directory saveDir,
@@ -65,6 +74,12 @@ class ModArchiveService {
     });
 
     final file = File('${saveDir.path}/$filename');
+
+    // Skip the download when the same file has already been saved.
+    if (file.existsSync() && file.lengthSync() > 0) {
+      return (path: file.absolute.path, alreadyExists: true);
+    }
+
     final client = HttpClient();
 
     try {
@@ -95,7 +110,7 @@ class ModArchiveService {
       );
     }
 
-    return file.absolute.path;
+    return (path: file.absolute.path, alreadyExists: false);
   }
 
   // ---------------------------------------------------------------------------

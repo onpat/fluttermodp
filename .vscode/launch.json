@@ -1,0 +1,17 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "fluttermodp (Dev)",
+      "request": "launch",
+      "type": "dart",
+      "args": ["--flavor", "Dev"]
+    },
+    {
+      "name": "fluttermodp (Prod)",
+      "request": "launch",
+      "type": "dart",
+      "args": ["--flavor", "Prod"]
+    }
+  ]
+}
